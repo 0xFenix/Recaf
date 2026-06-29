@@ -1,16 +1,9 @@
 package software.coley.recaf.services.compile.stub;
 
-import dev.xdark.blw.type.ArrayType;
-import dev.xdark.blw.type.ClassType;
-import dev.xdark.blw.type.InstanceType;
-import dev.xdark.blw.type.MethodType;
-import dev.xdark.blw.type.ObjectType;
-import dev.xdark.blw.type.PrimitiveType;
-import dev.xdark.blw.type.Type;
-import dev.xdark.blw.type.Types;
 import jakarta.annotation.Nonnull;
 import jakarta.annotation.Nullable;
 import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.Type;
 import software.coley.recaf.info.ClassInfo;
 import software.coley.recaf.info.InnerClassInfo;
 import software.coley.recaf.info.JvmClassInfo;
@@ -23,12 +16,16 @@ import software.coley.recaf.services.inheritance.InheritanceVertex;
 import software.coley.recaf.util.AccessFlag;
 import software.coley.recaf.util.Keywords;
 import software.coley.recaf.util.StringUtil;
+import software.coley.recaf.util.Types;
 import software.coley.recaf.util.visitors.SkippingClassVisitor;
 import software.coley.recaf.workspace.model.Workspace;
 
 import java.lang.reflect.Modifier;
+import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
@@ -119,14 +116,25 @@ public abstract class ClassStubGenerator {
 	 */
 	protected void appendClassStructure(@Nonnull StringBuilder code) {
 		// Class structure
+		boolean isEnum = AccessFlag.isEnum(classAccess);
+		boolean isInterface = AccessFlag.isInterface(classAccess);
 		InheritanceVertex classVertex = inheritanceGraph.getVertex(className);
 		if (classVertex != null && classVertex.getParents().stream().anyMatch(this::isSealedType))
 			code.append("non-sealed ");
-		code.append(AccessFlag.isEnum(classAccess) ? "enum " : getLocalModifier() + " class ").append(getLocalName());
-		if (superName != null && !superName.equals("java/lang/Object") && !superName.equals("java/lang/Enum"))
-			code.append(" extends ").append(superName.replace('/', '.'));
+		if (isEnum) {
+			code.append("enum ").append(getLocalName());
+		} else {
+			String modifier = getLocalModifier();
+			if (!modifier.isBlank())
+				code.append(modifier).append(' ');
+			code.append(isInterface ? "interface " : "class ").append(getLocalName());
+		}
+		if (!isInterface && superName != null && !superName.equals("java/lang/Object") && !superName.equals("java/lang/Enum"))
+			code.append(" extends ").append(cleanType(superName));
 		if (implementing != null && !implementing.isEmpty())
-			code.append(" implements ").append(implementing.stream().map(s -> s.replace('/', '.')).collect(Collectors.joining(", "))).append(' ');
+			code.append(isInterface ? " extends " : " implements ").append(implementing.stream()
+					.map(ClassStubGenerator::cleanType)
+					.collect(Collectors.joining(", "))).append(' ');
 		code.append("{\n");
 	}
 
@@ -158,11 +166,8 @@ public abstract class ClassStubGenerator {
 	 *
 	 * @param code
 	 * 		Class code to append the fields to.
-	 *
-	 * @throws ExpressionCompileException
-	 * 		When the fields could not be stubbed out.
 	 */
-	protected void appendFields(@Nonnull StringBuilder code) throws ExpressionCompileException {
+	protected void appendFields(@Nonnull StringBuilder code) {
 		// Stub out fields / methods
 		for (FieldMember field : fields) {
 			// Skip stubbing compiler-generated fields.
@@ -194,7 +199,7 @@ public abstract class ClassStubGenerator {
 
 	/**
 	 * Appends all method stubs to the class.
-	 * Some methods can be skipped by implementing {@link #doSkipMethod(String, MethodType)}.
+	 * Some methods can be skipped by implementing {@link #doSkipMethod(String, Type)}.
 	 *
 	 * @param code
 	 * 		Class code to append the methods to.
@@ -204,6 +209,7 @@ public abstract class ClassStubGenerator {
 	 */
 	protected void appendMethods(@Nonnull StringBuilder code) throws ExpressionCompileException {
 		boolean isEnum = AccessFlag.isEnum(classAccess);
+		boolean isInterface = AccessFlag.isInterface(classAccess);
 		for (MethodMember method : methods) {
 			// Skip stubbing compiler-generated methods.
 			if (method.hasBridgeModifier() || method.hasSyntheticModifier())
@@ -222,7 +228,7 @@ public abstract class ClassStubGenerator {
 
 			// Skip stubbing the method if it is the one we're assembling the expression within.
 			String descriptor = method.getDescriptor();
-			MethodType localMethodType = Types.methodType(descriptor);
+			Type localMethodType = Type.getMethodType(descriptor);
 			if (doSkipMethod(name, localMethodType))
 				continue;
 
@@ -237,25 +243,19 @@ public abstract class ClassStubGenerator {
 				continue;
 
 			// Skip stubbing of methods with bad return types / bad parameter types.
-			NameType returnInfo = getInfo(name, localMethodType.returnType().descriptor());
+			NameType returnInfo = getInfo(name, localMethodType.getReturnType().getDescriptor());
 			if (!isSafeClassName(returnInfo.className))
 				continue;
-			List<ClassType> parameterTypes = localMethodType.parameterTypes();
-			if (!parameterTypes.stream().map(p -> {
-				try {
-					return getInfo("p", p.descriptor()).className();
-				} catch (Throwable t) {
-					return "\0"; // Bogus which will throw off the safe name check.
-				}
-			}).allMatch(ClassStubGenerator::isSafeClassName))
-				continue;
+			Type[] parameterTypes = localMethodType.getArgumentTypes();
+			for (Type parameterType : parameterTypes)
+				if (!isSafeClassName(getInfo("p", parameterType.getDescriptor()).className))
+					return;
 
 			// Skip methods with return/parameter types that aren't accessible in the workspace.
 			boolean hasMissingType = false;
-			Type[] types = new Type[parameterTypes.size() + 1];
-			for (int i = 0; i < types.length - 1; i++)
-				types[i] = parameterTypes.get(i);
-			types[parameterTypes.size()] = localMethodType.returnType();
+			Type[] types = new Type[parameterTypes.length + 1];
+			System.arraycopy(parameterTypes, 0, types, 0, types.length - 1);
+			types[parameterTypes.length] = localMethodType.getReturnType();
 			for (Type type : types) {
 				hasMissingType = isMissingType(type);
 				if (hasMissingType)
@@ -272,6 +272,8 @@ public abstract class ClassStubGenerator {
 				code.append("private ");
 			if (method.hasStaticModifier())
 				code.append("static ");
+			else if (isInterface && !method.hasAbstractModifier() && !method.hasPrivateModifier())
+				code.append("default ");
 
 			// Method name. Consider edge case for constructors.
 			if (isCtor)
@@ -280,23 +282,28 @@ public abstract class ClassStubGenerator {
 				code.append(returnInfo.className()).append(' ').append(returnInfo.name).append('(');
 
 			// Add the parameters. We only care about the types, names don't really matter.
-			List<ClassType> methodParameterTypes = parameterTypes;
-			int parameterCount = methodParameterTypes.size();
+			Type[] methodParameterTypes = Arrays.copyOf(parameterTypes, parameterTypes.length);
+			int parameterCount = methodParameterTypes.length;
 			for (int i = 0; i < parameterCount; i++) {
-				ClassType paramType = methodParameterTypes.get(i);
+				Type paramType = methodParameterTypes[i];
 
 				// Skip this parameter if it is an inner class's outer "this" reference
 				if (isCtor
-						&& paramType instanceof ObjectType paramObjectType
-						&& className.startsWith(paramObjectType.internalName() + '$'))
+						&& paramType.getSort() == Type.OBJECT
+						&& className.startsWith(paramType.getInternalName() + '$'))
 					continue;
 
-				NameType paramInfo = getInfo("p" + i, paramType.descriptor());
+				NameType paramInfo = getInfo("p" + i, paramType.getDescriptor());
 				code.append(paramInfo.className).append(' ').append(paramInfo.name);
 				if (i < parameterCount - 1)
 					code.append(", ");
 			}
-			code.append(") { ");
+			code.append(')');
+			if (isInterface && method.hasAbstractModifier() && !method.hasStaticModifier() && !method.hasPrivateModifier()) {
+				code.append(";\n");
+				continue;
+			}
+			code.append(" { ");
 			if (isCtor) {
 				// If we know the parent type, we need to properly implement the constructor.
 				// If we don't know the parent type, we cannot generate a valid constructor.
@@ -310,20 +317,32 @@ public abstract class ClassStubGenerator {
 					// To make it easy, we'll find the simplest constructor in the parent class and pass dummy values.
 					// Unlike regular methods we cannot just say 'throw new RuntimeException();' since calling
 					// the 'super(...)' is required.
-					MethodType parentConstructor = superPath.getValue().methodStream()
+					Type parentConstructor = superPath.getValue().methodStream()
 							.filter(m -> m.getName().equals("<init>"))
-							.map(m -> Types.methodType(m.getDescriptor()))
-							.min(Comparator.comparingInt(a -> a.parameterTypes().size()))
+							.map(m -> Type.getMethodType(m.getDescriptor()))
+							.min(Comparator.comparingInt(Type::getArgumentCount))
 							.orElse(null);
 					if (parentConstructor != null) {
 						code.append("super(");
-						parameterCount = parentConstructor.parameterTypes().size();
-						for (int i = 0; i < parameterCount; i++) {
-							ClassType type = parentConstructor.parameterTypes().get(i);
-							if (type instanceof ObjectType) {
+
+						// Filter out any leading parameters that are the outer "this" reference of an inner class,
+						// since those are not actually passed by the caller in the source code.
+						Type[] parentParameterTypes = parentConstructor.getArgumentTypes();
+						int startIndex = 0;
+						if (parentParameterTypes.length != 0) {
+							Type firstParameterType = parentParameterTypes[0];
+							if (firstParameterType.getSort() == Type.OBJECT &&
+									className.startsWith(firstParameterType.getInternalName() + '$'))
+								startIndex = 1;
+						}
+
+						parameterCount = parentParameterTypes.length;
+						for (int i = startIndex; i < parameterCount; i++) {
+							Type type = parentParameterTypes[i];
+							if (type.getSort() == Type.OBJECT) {
 								code.append("null");
 							} else {
-								char prim = type.descriptor().charAt(0);
+								char prim = type.getDescriptor().charAt(0);
 								if (prim == 'Z')
 									code.append("false");
 								else
@@ -341,7 +360,6 @@ public abstract class ClassStubGenerator {
 		}
 	}
 
-
 	/**
 	 * @param code
 	 * 		Class code to append the inner classes to.
@@ -350,13 +368,24 @@ public abstract class ClassStubGenerator {
 	 * 		When the inner classes could not be stubbed out.
 	 */
 	protected void appendInnerClasses(@Nonnull StringBuilder code) throws ExpressionCompileException {
+		Set<String> visited = new HashSet<>();
 		for (InnerClassInfo innerClass : innerClasses) {
 			String innerClassName = innerClass.getInnerClassName();
-			if (!innerClassName.startsWith(className))
+
+			// Skip duplicate inner classes.
+			if (!visited.add(innerClassName))
 				continue;
-			if (innerClassName.length() <= className.length())
+
+			// If the inner class's outer class name is not an exact match, skip it.
+			// We will recursively visit nested inner classes, so if we have:
+			//  A$B$C
+			// Then we don't want to put C as a direct inner of A.
+			// We want to make B an inner of A, and C an inner of B.
+			if (!className.equals(innerClass.getOuterClassName()))
 				continue;
-			if (!isSafeClassName(innerClassName.replace('/', '.').replace('$', '.')))
+
+			// Skip stubbing of inner classes with illegal names.
+			if (!isSafeClassName(cleanType(innerClassName)))
 				continue;
 			ClassPathNode innerClassPath = workspace.findClass(innerClassName);
 			if (innerClassPath != null) {
@@ -399,7 +428,7 @@ public abstract class ClassStubGenerator {
 	 *
 	 * @return {@code true} to skip. {@code false} to include in output stubbing.
 	 */
-	protected abstract boolean doSkipMethod(@Nonnull String name, @Nonnull MethodType type);
+	protected abstract boolean doSkipMethod(@Nonnull String name, @Nonnull Type type);
 
 	/**
 	 * @return Modifier to prefix {@code Foo} in {@code class Foo {}}.
@@ -415,6 +444,27 @@ public abstract class ClassStubGenerator {
 	@Nonnull
 	protected String getLocalName() {
 		return StringUtil.shortenPath(className);
+	}
+
+	/**
+	 * @param type
+	 * 		Some internal type name.
+	 *
+	 * @return Cleaned name for use in source.
+	 */
+	@Nonnull
+	protected static String cleanType(String type) {
+		return type.replace('/', '.').replace('$', '.');
+	}
+
+	/**
+	 * @param type
+	 * 		Some internal type name.
+	 *
+	 * @return {@code true} if the type is an inner class of the current class.
+	 */
+	protected boolean isInnerClassType(@Nonnull String type) {
+		return innerClasses.stream().anyMatch(c -> c.getInnerClassName().equals(type));
 	}
 
 	/**
@@ -435,8 +485,8 @@ public abstract class ClassStubGenerator {
 		// The descriptor must be: L + className + ;
 		if (field.getDescriptor().length() != className.length() + 2)
 			return false;
-		InstanceType fieldDesc = Types.instanceTypeFromDescriptor(field.getDescriptor());
-		return fieldDesc.internalName().equals(className);
+		Type fieldDesc = Type.getObjectType(field.getDescriptor());
+		return fieldDesc.getInternalName().equals(className);
 	}
 
 	/**
@@ -466,7 +516,7 @@ public abstract class ClassStubGenerator {
 	 * @return {@code true} if the type in the descriptor is found in the {@link #workspace}.
 	 */
 	protected boolean isMissingType(@Nonnull String descriptor) {
-		Type type = Types.typeFromDescriptor(descriptor);
+		Type type = Type.getType(descriptor);
 		return isMissingType(type);
 	}
 
@@ -477,12 +527,15 @@ public abstract class ClassStubGenerator {
 	 * @return {@code true} if the type in the descriptor is found in the {@link #workspace}.
 	 */
 	protected boolean isMissingType(@Nonnull Type type) {
-		if (type instanceof InstanceType instanceType && workspace.findClass(instanceType.internalName()) == null)
+		if (type.getSort() == Type.OBJECT && workspace.findClass(type.getInternalName()) == null)
 			return true;
-		else
-			return type instanceof ArrayType arrayType
-					&& arrayType.rootComponentType() instanceof InstanceType instanceType
-					&& workspace.findClass(instanceType.internalName()) == null;
+		else if (type.getSort() == Type.ARRAY) {
+			Type elementType = type.getElementType();
+			if (elementType.getSort() == Type.OBJECT)
+				return workspace.findClass(elementType.getInternalName()) == null;
+			else
+				return false;
+		} else return false;
 	}
 
 	/**
@@ -525,7 +578,7 @@ public abstract class ClassStubGenerator {
 		}
 
 		// Cannot be a reserved keyword.
-		return !Keywords.getKeywords().contains(name);
+		return !Keywords.getKeywordsWithoutVarSafe().contains(name);
 	}
 
 	/**
@@ -579,33 +632,28 @@ public abstract class ClassStubGenerator {
 	 * 		Variable descriptor.
 	 *
 	 * @return Variable info wrapper.
-	 *
-	 * @throws ExpressionCompileException
-	 * 		When the variable descriptor is malformed.
 	 */
 	@Nonnull
-	protected static NameType getInfo(@Nonnull String name, @Nonnull String descriptor) throws ExpressionCompileException {
+	protected static NameType getInfo(@Nonnull String name, @Nonnull String descriptor) {
 		int size;
 		String className;
 		if (Types.isPrimitive(descriptor)) {
-			PrimitiveType primitiveType = Types.primitiveFromDesc(descriptor);
-			size = Types.category(primitiveType);
-			className = primitiveType.name();
+			Type primitiveType = Type.getType(descriptor);
+			size = Types.isWide(primitiveType) ? 2 : 1;
+			className = primitiveType.getClassName();
 		} else if (descriptor.charAt(0) == '[') {
-			ArrayType arrayParameterType = Types.arrayTypeFromDescriptor(descriptor);
-			ClassType componentReturnType = arrayParameterType.componentType();
-			if (componentReturnType instanceof PrimitiveType primitiveParameter) {
-				className = primitiveParameter.name();
-			} else if (componentReturnType instanceof InstanceType instanceType) {
-				className = instanceType.internalName().replace('/', '.').replace('$', '.');
+			Type arrayParameterType = Type.getType(descriptor);
+			Type componentReturnType = arrayParameterType.getElementType();
+			if (Types.isPrimitive(componentReturnType)) {
+				className = componentReturnType.getClassName();
 			} else {
-				throw new ExpressionCompileException("Illegal component type: " + componentReturnType);
+				className = cleanType(componentReturnType.getInternalName());
 			}
-			className += "[]".repeat(arrayParameterType.dimensions());
+			className += "[]".repeat(arrayParameterType.getDimensions());
 			size = 1;
 		} else {
 			size = 1;
-			className = Types.instanceTypeFromDescriptor(descriptor).internalName().replace('/', '.').replace('$', '.');
+			className = cleanType(Type.getType(descriptor).getInternalName());
 		}
 		return new NameType(size, name, className);
 	}
@@ -620,6 +668,5 @@ public abstract class ClassStubGenerator {
 	 * @param className
 	 * 		Variable class type name.
 	 */
-	protected record NameType(int size, @Nonnull String name, @Nonnull String className) {
-	}
+	protected record NameType(int size, @Nonnull String name, @Nonnull String className) {}
 }

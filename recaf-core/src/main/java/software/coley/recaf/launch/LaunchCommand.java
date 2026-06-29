@@ -1,6 +1,5 @@
 package software.coley.recaf.launch;
 
-import ch.qos.logback.classic.Level;
 import jakarta.annotation.Nullable;
 import jakarta.enterprise.inject.spi.Bean;
 import jakarta.enterprise.inject.spi.BeanManager;
@@ -15,6 +14,7 @@ import software.coley.recaf.util.StringUtil;
 
 import java.io.File;
 import java.io.StringWriter;
+import java.lang.System.Logger.Level;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -23,7 +23,7 @@ import java.util.concurrent.Callable;
  * Launch arguments for Recaf.
  *
  * @author Matt Coley
- * @see LaunchArguments Bean accesible form availble to CDI components.
+ * @see LaunchArguments Bean accessible form available to CDI components.
  */
 @Command(name = "recaf", mixinStandardHelpOptions = true, version = RecafBuildConfig.VERSION,
 		description = "Recaf: The modern Java reverse engineering tool.")
@@ -36,8 +36,10 @@ public class LaunchCommand implements Callable<Boolean> {
 	private File dataDir;
 	@Option(names = {"-r", "--extraplugins"}, description = "Point to an external location to load additional plugins.")
 	private File extraPluginDirectory;
-	@Option(names = {"-h", "--headless"}, description = "Flag to skip over initializing the UI. Should be paired with -i or -s.")
+	@Option(names = {"-h", "--headless"}, description = "Flag to skip over initializing the UI. Should be paired with -i, -s, or --idle.")
 	private boolean headless;
+	@Option(names = {"--idle"}, description = "Keep headless Recaf running after startup for plugin-hosted services.")
+	private boolean idle;
 	@Option(names = {"-q", "--silent"}, description = "Disable slf4j logging to std-out.")
 	private boolean silent;
 	@Option(names = {"-v", "--version"}, description = "Display the version information.")
@@ -51,7 +53,7 @@ public class LaunchCommand implements Callable<Boolean> {
 	public Boolean call() throws Exception {
 		boolean ret = false;
 		if (silent)
-			RecafLoggingFilter.defaultLevel = Level.OFF;
+			RecafLoggingFilter.setConsoleLevel(Level.OFF);
 		if (dataDir != null)
 			System.setProperty("RECAF_DIR", dataDir.getAbsolutePath());
 		if (extraPluginDirectory != null)
@@ -120,5 +122,12 @@ public class LaunchCommand implements Callable<Boolean> {
 	 */
 	public boolean isHeadless() {
 		return headless;
+	}
+
+	/**
+	 * @return Flag to keep headless Recaf running after startup.
+	 */
+	public boolean isIdle() {
+		return idle;
 	}
 }

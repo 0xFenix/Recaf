@@ -72,9 +72,11 @@ import software.coley.recaf.services.deobfuscation.transform.generic.StaticValue
 import software.coley.recaf.services.deobfuscation.transform.generic.UnknownAttributeRemovingTransformer;
 import software.coley.recaf.services.deobfuscation.transform.generic.VariableFoldingTransformer;
 import software.coley.recaf.services.deobfuscation.transform.generic.VariableTableNormalizingTransformer;
+import software.coley.recaf.services.deobfuscation.transform.specific.DashOpaqueSeedFoldingTransformer;
 import software.coley.recaf.services.info.association.FileTypeSyntaxAssociationService;
 import software.coley.recaf.services.navigation.Actions;
 import software.coley.recaf.services.transform.ClassTransformer;
+import software.coley.recaf.services.transform.CollectionTransformer;
 import software.coley.recaf.services.transform.JvmClassTransformer;
 import software.coley.recaf.services.transform.JvmTransformResult;
 import software.coley.recaf.services.transform.TransformationApplier;
@@ -105,6 +107,7 @@ import software.coley.recaf.workspace.model.bundle.ClassBundle;
 import software.coley.recaf.workspace.model.resource.WorkspaceResource;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -208,12 +211,19 @@ public class DeobfuscationWindow extends RecafStage {
 					restoration
 			);
 			TreeItem<Selection> specific = new TreeItem<>(new Selection.Category("deobf.tree.specific", CarbonIcons.CENTER_CIRCLE));
+			specific.getChildren().addAll(of(
+					// TODO: When we have more specific transformers, separate into sub-sections instead of putting them all flat here.
+					DashOpaqueSeedFoldingTransformer.class
+			));
+			TreeItem<Selection> pluginProvided = new TreeItem<>(new Selection.Category("deobf.tree.plugin-provided", CarbonIcons.PLUG));
+			pluginProvided.getChildren().addAll(ofCollection(Unchecked.cast(transformationManager.getThirdPartyJvmTransformers())));
 			root.getChildren().addAll(
 					generic,
-					specific
+					specific,
+					pluginProvided
 			);
 			generic.setExpanded(true);
-			specific.setExpanded(true);
+			pluginProvided.setExpanded(true);
 
 			TreeView<Selection> transformerTree = new TreeView<>();
 			transformerTree.setCellFactory(view -> new TreeCell<>() {
@@ -513,9 +523,14 @@ public class DeobfuscationWindow extends RecafStage {
 		setHeight(600);
 	}
 
-	@SuppressWarnings("unchecked")
+	@SafeVarargs
 	private List<TreeItem<Selection>> of(Class<? extends ClassTransformer>... transformerClasses) {
-		List<TreeItem<Selection>> results = new ArrayList<>(transformerClasses.length);
+		return ofCollection(List.of(transformerClasses));
+	}
+
+	@SuppressWarnings("unchecked")
+	private List<TreeItem<Selection>> ofCollection(Collection<Class<? extends ClassTransformer>> transformerClasses) {
+		List<TreeItem<Selection>> results = new ArrayList<>(transformerClasses.size());
 		for (Class<? extends ClassTransformer> transformerClass : transformerClasses) {
 			try {
 				if (JvmClassTransformer.class.isAssignableFrom(transformerClass)) {
@@ -715,7 +730,7 @@ public class DeobfuscationWindow extends RecafStage {
 		@Override
 		public void onTransformFailure(@Nonnull Workspace workspace, @Nonnull WorkspaceResource resource,
 		                               @Nonnull ClassBundle<?> bundle, @Nonnull ClassInfo classInfo,
-		                               @Nonnull ClassTransformer transformer,int pass,
+		                               @Nonnull ClassTransformer transformer, int pass,
 		                               @Nullable Throwable error) {
 			// TODO: In the UI we should show errors affecting classes grouped by transformer as they occur.
 			//  - Mainly so that users can report bugs on specific transformers when they run into issues.
@@ -725,7 +740,7 @@ public class DeobfuscationWindow extends RecafStage {
 		@Override
 		public void onTransformedWithoutWork(@Nonnull Workspace workspace, @Nonnull WorkspaceResource resource,
 		                                     @Nonnull ClassBundle<?> bundle, @Nonnull ClassInfo classInfo,
-		                                     @Nonnull ClassTransformer transformer,int pass) {
+		                                     @Nonnull ClassTransformer transformer, int pass) {
 			onTransformed(workspace, resource, bundle, classInfo, transformer, pass);
 		}
 
@@ -770,8 +785,11 @@ public class DeobfuscationWindow extends RecafStage {
 
 		@Override
 		public boolean shouldTransform(@Nonnull Workspace workspace, @Nonnull WorkspaceResource resource,
-		                               @Nonnull ClassBundle<?> bundle, @Nonnull ClassInfo classInfo,  @Nonnull ClassTransformer transformer,int pass) {
-			return classInfo.isInnerClassOf(targetClass.getName());
+		                               @Nonnull ClassBundle<?> bundle, @Nonnull ClassInfo classInfo,
+		                               @Nonnull ClassTransformer transformer, int pass) {
+			return classInfo.getName().equals(targetClass.getName())
+					|| classInfo.isInnerClassOf(targetClass.getName())
+					|| transformer instanceof CollectionTransformer;
 		}
 	}
 

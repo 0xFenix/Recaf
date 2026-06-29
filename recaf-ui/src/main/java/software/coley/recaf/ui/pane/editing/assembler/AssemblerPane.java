@@ -43,7 +43,7 @@ import software.coley.recaf.ui.control.richtext.problem.ProblemLevel;
 import software.coley.recaf.ui.control.richtext.problem.ProblemPhase;
 import software.coley.recaf.ui.control.richtext.problem.ProblemTracking;
 import software.coley.recaf.ui.control.richtext.search.SearchBar;
-import software.coley.recaf.ui.control.richtext.suggest.AssemblerTabCompleter;
+import software.coley.recaf.ui.control.richtext.suggest.assembler.AssemblerTabCompleter;
 import software.coley.recaf.ui.control.richtext.suggest.TabCompletionConfig;
 import software.coley.recaf.ui.control.richtext.syntax.RegexLanguages;
 import software.coley.recaf.ui.control.richtext.syntax.RegexSyntaxHighlighter;
@@ -52,6 +52,7 @@ import software.coley.recaf.ui.pane.editing.SideTabsInjector;
 import software.coley.recaf.ui.pane.editing.tabs.FieldsAndMethodsPane;
 import software.coley.recaf.util.Animations;
 import software.coley.recaf.util.FxThreadUtil;
+import software.coley.recaf.util.threading.ThreadUtil;
 import software.coley.recaf.workspace.model.Workspace;
 import software.coley.recaf.workspace.model.bundle.Bundle;
 
@@ -137,7 +138,7 @@ public class AssemblerPane extends AbstractContentPane<PathNode<?>> implements U
 
 	/**
 	 * Called by {@link #lateInitForClass(ClassPathNode)} or {@link #lateInitForMethod(ClassMemberPathNode)}.
-	 * <p/>
+	 * <p>
 	 * Does late initialization that couldn't be done in the constructor.
 	 */
 	private void lateInit() {
@@ -147,7 +148,7 @@ public class AssemblerPane extends AbstractContentPane<PathNode<?>> implements U
 
 	/**
 	 * Called by {@link #onUpdatePath(PathNode)} once before the {@link #path} is set for the first time.
-	 * <p/>
+	 * <p>
 	 * Sets up {@link FieldsAndMethodsPane} as a side-tab and sets up notifications for {@link AssemblerToolTabs}
 	 * and its children when the selected {@link ClassMember} in the {@link #lastConcreteAst} changes.
 	 *
@@ -336,7 +337,7 @@ public class AssemblerPane extends AbstractContentPane<PathNode<?>> implements U
 	@Nonnull
 	private CompletableFuture<Result<String>> disassemble() {
 		problemTracking.removeByPhase(ProblemPhase.LINT);
-		return CompletableFuture.supplyAsync(() -> pipeline.disassemble(path))
+		return CompletableFuture.supplyAsync(() -> pipeline.disassemble(path), ThreadUtil.executor())
 				.orTimeout(10, TimeUnit.SECONDS)
 				.whenCompleteAsync((result, error) -> {
 					if (result != null)

@@ -5,6 +5,7 @@ import jakarta.annotation.Nullable;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.analysis.Frame;
 import org.slf4j.Logger;
@@ -17,6 +18,7 @@ import software.coley.recaf.services.deobfuscation.transform.generic.DeadCodeRem
 import software.coley.recaf.services.deobfuscation.transform.generic.FrameRemovingTransformer;
 import software.coley.recaf.services.inheritance.InheritanceGraph;
 import software.coley.recaf.services.mapping.aggregate.AggregatedMappings;
+import software.coley.recaf.util.ClassMethodPair;
 import software.coley.recaf.util.analysis.ReAnalyzer;
 import software.coley.recaf.util.analysis.ReInterpreter;
 import software.coley.recaf.util.analysis.lookup.BasicGetStaticLookup;
@@ -35,7 +37,6 @@ import software.coley.recaf.workspace.model.resource.WorkspaceResource;
 
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -43,20 +44,15 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 
 /**
- * Context for holding a number of JVM class transformers and shared state for transformation.
+ * JVM-specific transformer-context implementation.
  *
  * @author Matt Coley
  */
-public class JvmTransformerContext {
+public class JvmTransformerContext extends AbstractTransformerContext<JvmClassTransformer> {
 	private static final Logger logger = Logging.get(JvmTransformerContext.class);
-	private final Map<Class<? extends JvmClassTransformer>, JvmClassTransformer> transformerMap;
 	private final AggregatedMappings mappings;
-	private final Set<String> classesToRemove = ConcurrentHashMap.newKeySet();
 	private final Map<String, JvmClassData> classData = new ConcurrentHashMap<>();
 	private final Set<String> recomputeFrameClasses = ConcurrentHashMap.newKeySet();
-	private final ThreadLocal<Boolean> transformerDidWork = ThreadLocal.withInitial(() -> false);
-	private final Workspace workspace;
-	private final WorkspaceResource resource;
 	private Supplier<GetFieldLookup> getFieldLookupSupplier = () -> null;
 	private Supplier<GetStaticLookup> getStaticLookupSupplier = BasicGetStaticLookup::new;
 	private Supplier<InvokeVirtualLookup> invokeVirtualLookupSupplier = BasicInvokeVirtualLookup::new;
@@ -88,9 +84,7 @@ public class JvmTransformerContext {
 	 * 		Transformers to associate with this context.
 	 */
 	public JvmTransformerContext(@Nonnull Workspace workspace, @Nonnull WorkspaceResource resource, @Nonnull Collection<? extends JvmClassTransformer> transformers) {
-		this.transformerMap = buildMap(transformers);
-		this.workspace = workspace;
-		this.resource = resource;
+		super(workspace, resource, transformers);
 
 		// We will use aggregated mappings for the reverse-mapping utility it offers.
 		// Some transformers that aim to provide mappings will find this very handy.
@@ -238,7 +232,7 @@ public class JvmTransformerContext {
 	 * 		or if dead code removal encountered an error.
 	 */
 	public boolean pruneDeadCode(@Nonnull ClassNode declaringClass, @Nonnull MethodNode method) throws TransformationException {
-		return getJvmTransformer(DeadCodeRemovingTransformer.class).prune(declaringClass, method);
+		return getTransformer(DeadCodeRemovingTransformer.class).prune(declaringClass, method);
 	}
 
 	/**
@@ -256,7 +250,7 @@ public class JvmTransformerContext {
 
 	/**
 	 * Gets the current ASM node representation of the given class.
-	 * <p/>
+	 * <p>
 	 * Transformers can update the <i>"current"</i> state of the node via
 	 * {@link #setBytecode(JvmClassBundle, JvmClassInfo, byte[])} or
 	 * {@link #setNode(JvmClassBundle, JvmClassInfo, ClassNode)}.
@@ -277,7 +271,7 @@ public class JvmTransformerContext {
 
 	/**
 	 * Gets the current bytecode of the given class.
-	 * <p/>
+	 * <p>
 	 * Transformers can update the <i>"current"</i> state of the bytecode via
 	 * {@link #setBytecode(JvmClassBundle, JvmClassInfo, byte[])} or
 	 * {@link #setNode(JvmClassBundle, JvmClassInfo, ClassNode)}.
@@ -309,7 +303,7 @@ public class JvmTransformerContext {
 	 * @see #getNode(JvmClassBundle, JvmClassInfo)
 	 */
 	public void setNode(@Nonnull JvmClassBundle bundle, @Nonnull JvmClassInfo info, @Nonnull ClassNode node) {
-		transformerDidWork.set(true);
+		recordDidWork();
 		getJvmClassData(bundle, info).setNode(node);
 	}
 
@@ -327,42 +321,62 @@ public class JvmTransformerContext {
 	 * @see #getBytecode(JvmClassBundle, JvmClassInfo)
 	 */
 	public void setBytecode(@Nonnull JvmClassBundle bundle, @Nonnull JvmClassInfo info, @Nonnull byte[] bytecode) {
-		transformerDidWork.set(true);
+		recordDidWork();
 		getJvmClassData(bundle, info).setBytecode(bytecode);
 	}
 
 	/**
-	 * Marks a class for removal in the workspace.
+	 * Resolves a method instruction to the class and method it is calling.
 	 *
-	 * @param info
-	 * 		The class model in the workspace.
+	 * @param min
+	 * 		Method instruction to resolve.
 	 *
-	 * @see #getClassesToRemove()
+	 * @return The class and method being called, or {@code null} if the method cannot be resolved.
 	 */
-	public void markClassForRemoval(@Nonnull JvmClassInfo info) {
-		markClassForRemoval(info.getName());
+	@Nullable
+	public ClassMethodPair resolveMethod(@Nonnull MethodInsnNode min) {
+		String owner = min.owner;
+		String methodName = min.name;
+		String methodDesc = min.desc;
+
+		return resolveMethod(owner, methodName, methodDesc);
 	}
 
 	/**
-	 * Marks a class for removal in the workspace.
+	 * Resolves a method call to the class and method it is calling.
 	 *
-	 * @param name
-	 * 		Internal class name.
+	 * @param owner
+	 * 		Class name declaring the method.
+	 * @param methodName
+	 * 		Name of the method being called.
+	 * @param methodDesc
+	 * 		Descriptor of the method being called.
 	 *
-	 * @see #getClassesToRemove()
+	 * @return The class and method being called, or {@code null} if the method cannot be resolved.
 	 */
-	public void markClassForRemoval(@Nonnull String name) {
-		classesToRemove.add(name);
-	}
+	@Nullable
+	public ClassMethodPair resolveMethod(@Nonnull String owner,
+	                                     @Nonnull String methodName,
+	                                     @Nonnull String methodDesc) {
+		// Look up class in the workspace.
+		ClassPathNode classPath = workspace.findJvmClass(owner);
+		if (classPath == null)
+			return null;
 
-	/**
-	 * @return Names of classes marked for removal.
-	 *
-	 * @see #markClassForRemoval(JvmClassInfo)
-	 */
-	@Nonnull
-	public Set<String> getClassesToRemove() {
-		return Collections.unmodifiableSet(classesToRemove);
+		// Look up the bundle for the class.
+		JvmClassBundle bundle = classPath.getValueOfType(JvmClassBundle.class);
+		if (bundle == null)
+			return null;
+
+		// We really only looked up the class to get the containing bundle.
+		// Now that we have the bundle, we can look up the class node in its current form in this context
+		// and up-to-date method contents in that class.
+		JvmClassInfo classInfo = classPath.getValue().asJvmClass();
+		ClassNode classNode = getNode(bundle, classInfo);
+		for (MethodNode method : classNode.methods)
+			if (methodName.equals(method.name) && methodDesc.equals(method.desc))
+				return new ClassMethodPair(classNode, method);
+		return null;
 	}
 
 	/**
@@ -398,60 +412,6 @@ public class JvmTransformerContext {
 	@Nonnull
 	public AggregatedMappings getMappings() {
 		return mappings;
-	}
-
-	/**
-	 * @return Workspace containing the classes to transform.
-	 */
-	@Nonnull
-	public Workspace getWorkspace() {
-		return workspace;
-	}
-
-	/**
-	 * Get the {@link JvmClassTransformer} instance associated with this context, or throw an exception if no such
-	 * transformer is registered. If you are looking for an optional lookup use: {@link #getOptionalJvmTransformer(Class)}.
-	 *
-	 * @param key
-	 * 		Transformer class.
-	 * @param <T>
-	 * 		Transformer type.
-	 *
-	 * @return Shared instance of the transformer within this context.
-	 *
-	 * @throws TransformationException
-	 * 		When the transformer was not found within this context.
-	 */
-	@Nonnull
-	public <T extends JvmClassTransformer> T getJvmTransformer(Class<T> key) throws TransformationException {
-		T transformer = getOptionalJvmTransformer(key);
-		if (transformer == null)
-			throw new TransformationException("Transformation context attempted lookup of class '"
-					+ key.getSimpleName() + "' but did not have an associated entry");
-		return transformer;
-	}
-
-	/**
-	 * Get the {@link JvmClassTransformer} instance associated with this context, if it is registered.
-	 *
-	 * @param key
-	 * 		Transformer class.
-	 * @param <T>
-	 * 		Transformer type.
-	 *
-	 * @return Shared instance of the transformer within this context,
-	 * or {@code null} if no such transformer is registered to this context.
-	 */
-	@Nullable
-	@SuppressWarnings("unchecked")
-	public <T extends JvmClassTransformer> T getOptionalJvmTransformer(Class<T> key) {
-		// NOTE: Any Recaf-defined transformer must be @Dependent so that CDI doesn't give you proxy wrappers
-		// of the class. Our map is identity based, and if you do 'get(MyClass.class)' and we end up storing the
-		// proxy wrapper, then the lookup will fail even though the transformer is seemingly registered.
-		JvmClassTransformer transformer = transformerMap.get(key);
-		if (transformer == null)
-			return null;
-		return (T) transformer;
 	}
 
 	/**
@@ -494,39 +454,9 @@ public class JvmTransformerContext {
 		invokeStaticLookupSupplier = supplier;
 	}
 
-	/**
-	 * Called before any transformer operates with this context.
-	 * <br>
-	 * Clears any state associated with the operation of transformers.
-	 *
-	 * @see #didTransformerDoWork()
-	 */
-	protected void resetTransformerTracking() {
-		// Any transformation application should call this before the transformer methods operate on data.
-		transformerDidWork.set(false);
-	}
-
-	/**
-	 * Used to check if a {@link ClassTransformer} did work after its {@code transform} has been executed with
-	 * this context being used as a parameter.
-	 *
-	 * @return {@code true} if the last transformer ran did work with this context.
-	 */
-	protected boolean didTransformerDoWork() {
-		return transformerDidWork.get();
-	}
-
 	@Nonnull
 	private JvmClassData getJvmClassData(@Nonnull JvmClassBundle bundle, @Nonnull JvmClassInfo info) {
 		return classData.computeIfAbsent(info.getName(), ignored -> new JvmClassData(bundle, info));
-	}
-
-	@Nonnull
-	private static Map<Class<? extends JvmClassTransformer>, JvmClassTransformer> buildMap(@Nonnull Collection<? extends JvmClassTransformer> transformers) {
-		Map<Class<? extends JvmClassTransformer>, JvmClassTransformer> map = new IdentityHashMap<>();
-		for (JvmClassTransformer transformer : transformers)
-			map.put(transformer.getClass(), transformer);
-		return Collections.unmodifiableMap(map);
 	}
 
 	/**
@@ -560,7 +490,7 @@ public class JvmTransformerContext {
 				synchronized (this) {
 					if (node == null) {
 						node = new ClassNode();
-						int readerFlags = getOptionalJvmTransformer(FrameRemovingTransformer.class) == null ?
+						int readerFlags = getOptionalTransformer(FrameRemovingTransformer.class) == null ?
 								0 : ClassReader.SKIP_FRAMES; // Can bypass reading frames if this transformer is active.
 						new ClassReader(bytecode).accept(node, readerFlags);
 					}

@@ -8,6 +8,7 @@ import me.darknet.assembler.compiler.ClassResult;
 import me.darknet.assembler.compiler.Compiler;
 import me.darknet.assembler.compiler.CompilerOptions;
 import me.darknet.assembler.compiler.InheritanceChecker;
+import me.darknet.assembler.compiler.TypeAwareness;
 import me.darknet.assembler.error.Error;
 import me.darknet.assembler.error.Result;
 import me.darknet.assembler.printer.AnnotationHolder;
@@ -25,6 +26,7 @@ import software.coley.recaf.path.AnnotationPathNode;
 import software.coley.recaf.path.ClassMemberPathNode;
 import software.coley.recaf.path.ClassPathNode;
 import software.coley.recaf.path.PathNode;
+import software.coley.recaf.services.inheritance.InheritanceGraph;
 import software.coley.recaf.workspace.model.Workspace;
 
 import java.util.List;
@@ -44,13 +46,16 @@ import java.util.List;
 public abstract class AbstractAssemblerPipeline<C extends ClassInfo, R extends ClassResult, I extends ClassRepresentation> implements AssemblerPipeline<C, R, I> {
 	protected final AssemblerPipelineConfig pipelineConfig;
 	private final AssemblerPipelineGeneralConfig generalConfig;
+	private final InheritanceGraph inheritanceGraph;
 	private final ListenerHost indentListener = new ListenerHost();
 	protected PrintContext<?> context;
 
 	public AbstractAssemblerPipeline(@Nonnull AssemblerPipelineGeneralConfig generalConfig,
-	                                 @Nonnull AssemblerPipelineConfig pipelineConfig) {
+	                                 @Nonnull AssemblerPipelineConfig pipelineConfig,
+	                                 @Nonnull InheritanceGraph inheritanceGraph) {
 		this.generalConfig = generalConfig;
 		this.pipelineConfig = pipelineConfig;
+		this.inheritanceGraph = inheritanceGraph;
 
 		generalConfig.getDisassemblyIndent().addChangeListener(indentListener);
 	}
@@ -77,9 +82,65 @@ public abstract class AbstractAssemblerPipeline<C extends ClassInfo, R extends C
 	protected abstract Compiler getCompiler();
 
 	@Nonnull
-	protected abstract InheritanceChecker getInheritanceChecker();
+	protected TypeAwareness getTypeAwareness() {
+		return new TypeAwareness() {
+			@Override
+			public boolean isAwareOf(String type) {
+				return inheritanceGraph.getVertex(type) != null;
+			}
+
+			@Override
+			public String notifyUnknownType(String type) {
+				// TODO: We should have 'assembler.missingtypewarning' in the lang files, but we're not in the UI module
+				//   so we can't reference it here...
+				return "Type '" + type + "' is not present in the workspace. StackMapTable references to it will degrade to 'java/lang/Object'\n" +
+						"Consider either:\n" +
+						"- Adding a dependency containing the class to the workspace.\n" +
+						"- Enabling workspace phantom generation under 'All Services > Analysis > Phantom generator'.";
+			}
+		};
+	}
+
+	@Nonnull
+	protected InheritanceChecker getInheritanceChecker() {
+		return new InheritanceChecker() {
+			@Override
+			public boolean isSubclassOf(String child, String parent) {
+				return inheritanceGraph.isAssignableFrom(parent, child);
+			}
+
+			@Override
+			public String getCommonSuperclass(String type1, String type2) {
+				return inheritanceGraph.getCommon(type1, type2);
+			}
+		};
+	}
 
 	protected abstract int getClassVersion(@Nonnull C info);
+
+	@Nonnull
+	@Override
+	public Result<R> assemble(@Nonnull List<ASTElement> elements, @Nonnull PathNode<?> path) {
+		return compile(elements, path);
+	}
+
+	@Nonnull
+	@Override
+	public Result<String> disassemble(@Nonnull ClassPathNode path) {
+		return classPrinter(path).map(this::print);
+	}
+
+	@Nonnull
+	@Override
+	public Result<String> disassemble(@Nonnull ClassMemberPathNode path) {
+		return memberPrinter(path).map(this::print);
+	}
+
+	@Nonnull
+	@Override
+	public Result<String> disassemble(@Nonnull AnnotationPathNode path) {
+		return annotationPrinter(path).map(this::print);
+	}
 
 	@Nonnull
 	@SuppressWarnings("unchecked")
@@ -105,6 +166,7 @@ public abstract class AbstractAssemblerPipeline<C extends ClassInfo, R extends C
 
 		CompilerOptions<? extends CompilerOptions<?>> options = getCompilerOptions();
 		options.version(getClassVersion(info))
+				.awareness(getTypeAwareness())
 				.inheritanceChecker(getInheritanceChecker());
 
 		if (element.type() != ElementType.CLASS) {

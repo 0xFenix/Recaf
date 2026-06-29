@@ -2,8 +2,12 @@ package software.coley.recaf.util;
 
 import jakarta.annotation.Nonnull;
 import jakarta.annotation.Nullable;
+import org.objectweb.asm.ConstantDynamic;
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
+import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.util.CheckClassAdapter;
 
 import java.util.Arrays;
@@ -19,6 +23,16 @@ public class Types {
 	public static final Type OBJECT_TYPE = Type.getObjectType("java/lang/Object");
 	public static final Type CLASS_TYPE = Type.getObjectType("java/lang/Class");
 	public static final Type STRING_TYPE = Type.getObjectType("java/lang/String");
+	public static final Type BOX_VOID = Type.getObjectType("java/lang/Void");
+	public static final Type BOX_BOOLEAN = Type.getObjectType("java/lang/Boolean");
+	public static final Type BOX_CHAR = Type.getObjectType("java/lang/Character");
+	public static final Type BOX_BYTE = Type.getObjectType("java/lang/Byte");
+	public static final Type BOX_SHORT = Type.getObjectType("java/lang/Short");
+	public static final Type BOX_INT = Type.getObjectType("java/lang/Integer");
+	public static final Type BOX_FLOAT = Type.getObjectType("java/lang/Float");
+	public static final Type BOX_LONG = Type.getObjectType("java/lang/Long");
+	public static final Type BOX_DOUBLE = Type.getObjectType("java/lang/Double");
+	public static final Type METHOD_HANDLE_TYPE = Type.getObjectType("java/lang/invoke/MethodHandle");
 	public static final Type ARRAY_1D_BOOLEAN = Type.getObjectType("[Z");
 	public static final Type ARRAY_1D_CHAR = Type.getObjectType("[C");
 	public static final Type ARRAY_1D_BYTE = Type.getObjectType("[B");
@@ -158,6 +172,18 @@ public class Types {
 	}
 
 	/**
+	 * @param type
+	 * 		Some internal type name.
+	 *
+	 * @return {@code true} for super-types of arrays.
+	 */
+	public static boolean isArraySuperType(@Nonnull String type) {
+		return "java/lang/Object".equals(type)
+				|| "java/lang/Cloneable".equals(type)
+				|| "java/io/Serializable".equals(type);
+	}
+
+	/**
 	 * @param methodType
 	 * 		Parsed method descriptor type.
 	 *
@@ -260,6 +286,50 @@ public class Types {
 	}
 
 	/**
+	 * @param ldc
+	 * 		Constant load instruction.
+	 *
+	 * @return Type of the constant being loaded.
+	 */
+	@Nonnull
+	public static Type fromLdc(@Nonnull LdcInsnNode ldc) {
+		Object constant = ldc.cst;
+		return switch (constant) {
+			case Integer ignored -> Type.INT_TYPE;
+			case Float ignored -> Type.FLOAT_TYPE;
+			case Long ignored -> Type.LONG_TYPE;
+			case Double ignored -> Type.DOUBLE_TYPE;
+			case String ignored -> STRING_TYPE;
+			case Type ignored -> CLASS_TYPE;
+			case Handle ignored -> METHOD_HANDLE_TYPE;
+			case ConstantDynamic dynamic -> Type.getType(dynamic.getDescriptor());
+			default -> OBJECT_TYPE;
+		};
+	}
+
+	/**
+	 * @param sort
+	 * 		Type sort.
+	 *
+	 * @return Primitive type for the given sort, or {@link #OBJECT_TYPE} if not a primitive.
+	 */
+	@Nonnull
+	public static Type fromSort(int sort) {
+		return switch (sort) {
+			case Type.VOID -> Type.VOID_TYPE;
+			case Type.BOOLEAN -> Type.BOOLEAN_TYPE;
+			case Type.CHAR -> Type.CHAR_TYPE;
+			case Type.BYTE -> Type.BYTE_TYPE;
+			case Type.SHORT -> Type.SHORT_TYPE;
+			case Type.INT -> Type.INT_TYPE;
+			case Type.FLOAT -> Type.FLOAT_TYPE;
+			case Type.LONG -> Type.LONG_TYPE;
+			case Type.DOUBLE -> Type.DOUBLE_TYPE;
+			default -> OBJECT_TYPE;
+		};
+	}
+
+	/**
 	 * @param sort
 	 * 		Some type sort.
 	 *
@@ -298,6 +368,49 @@ public class Types {
 			case Type.METHOD -> "method";
 			case -1 -> "<undefined>";
 			default -> "<unknown>";
+		};
+	}
+
+	/**
+	 * @param tag
+	 *        {@link Handle#getTag()}.
+	 *
+	 * @return Name of sort.
+	 */
+	@Nonnull
+	public static String getArraySortName(int tag) {
+		return switch (tag) {
+			case Opcodes.T_BOOLEAN -> "boolean";
+			case Opcodes.T_CHAR -> "char";
+			case Opcodes.T_FLOAT -> "float";
+			case Opcodes.T_DOUBLE -> "double";
+			case Opcodes.T_BYTE -> "byte";
+			case Opcodes.T_SHORT -> "short";
+			case Opcodes.T_INT -> "int";
+			case Opcodes.T_LONG -> "long";
+			case -1 -> "<undefined>";
+			default -> "<unknown>";
+		};
+	}
+
+	/**
+	 * @param operand
+	 *        {@link IntInsnNode#operand} for {@link Opcodes#NEWARRAY}.
+	 *
+	 * @return Type of array element, or {@link #OBJECT_TYPE} if the operand does not match a primitive type.
+	 */
+	@Nonnull
+	public static Type newArrayElementType(int operand) {
+		return switch (operand) {
+			case Opcodes.T_BOOLEAN -> Type.BOOLEAN_TYPE;
+			case Opcodes.T_CHAR -> Type.CHAR_TYPE;
+			case Opcodes.T_FLOAT -> Type.FLOAT_TYPE;
+			case Opcodes.T_DOUBLE -> Type.DOUBLE_TYPE;
+			case Opcodes.T_BYTE -> Type.BYTE_TYPE;
+			case Opcodes.T_SHORT -> Type.SHORT_TYPE;
+			case Opcodes.T_INT -> Type.INT_TYPE;
+			case Opcodes.T_LONG -> Type.LONG_TYPE;
+			default -> OBJECT_TYPE;
 		};
 	}
 
@@ -376,7 +489,6 @@ public class Types {
 	public static boolean isValidFieldSignature(@Nullable String signature) {
 		return isValidSignature(signature, SignatureContext.FIELD);
 	}
-
 
 	/**
 	 * @param signature

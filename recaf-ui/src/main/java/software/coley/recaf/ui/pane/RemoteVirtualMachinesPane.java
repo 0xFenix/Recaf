@@ -6,6 +6,8 @@ import com.sun.tools.attach.VirtualMachineDescriptor;
 import jakarta.annotation.Nonnull;
 import jakarta.enterprise.context.Dependent;
 import jakarta.inject.Inject;
+import javafx.beans.binding.Bindings;
+import javafx.beans.binding.StringBinding;
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.SimpleBooleanProperty;
 import javafx.beans.property.SimpleStringProperty;
@@ -24,6 +26,8 @@ import javafx.scene.control.TabPane;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
 import javafx.scene.control.cell.TextFieldTableCell;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
@@ -31,6 +35,7 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
+import javafx.stage.Window;
 import org.kordamp.ikonli.Ikon;
 import org.kordamp.ikonli.carbonicons.CarbonIcons;
 import org.slf4j.Logger;
@@ -51,6 +56,7 @@ import software.coley.recaf.util.DesktopUtil;
 import software.coley.recaf.util.ErrorDialogs;
 import software.coley.recaf.util.FxThreadUtil;
 import software.coley.recaf.util.Lang;
+import software.coley.recaf.util.SceneUtils;
 import software.coley.recaf.util.threading.ThreadUtil;
 import software.coley.recaf.workspace.model.BasicWorkspace;
 import software.coley.recaf.workspace.model.Workspace;
@@ -292,7 +298,12 @@ public class RemoteVirtualMachinesPane extends BorderPane implements PostScanLis
 			boolean canConnect = attachManager.getVirtualMachineConnectionFailure(descriptor) == null;
 			CarbonIcons titleIcon = canConnect ? CarbonIcons.DEBUG : CarbonIcons.ERROR_FILLED;
 			FontIconView titleGraphic = new FontIconView(titleIcon, 28, canConnect ? Color.LIME.brighter() : Color.RED);
-			Button connectButton = new ActionButton(titleGraphic, getBinding("attach.connect"), () -> {
+			BooleanProperty working = new SimpleBooleanProperty();
+			StringBinding bindingConnect = getBinding("attach.connect");
+			StringBinding bindingProgress = getBinding("attach.connecting");
+			StringBinding dynamicBinding = Bindings.when(working).then(bindingProgress).otherwise(bindingConnect);
+			Button connectButton = new ActionButton(titleGraphic, dynamicBinding, () -> {
+				working.set(true);
 				if (workspaceManager.closeCurrent()) {
 					ThreadUtil.run(() -> {
 						try {
@@ -306,14 +317,19 @@ public class RemoteVirtualMachinesPane extends BorderPane implements PostScanLis
 									getBinding("dialog.error.attach.header"),
 									getBinding("dialog.error.attach.content"),
 									ex);
+						} finally {
+							FxThreadUtil.run(() -> working.set(false));
 						}
 					});
 				}
 			});
+
+
 			// Give the button a rounded appearance, which becomes solid
 			connectButton.setMinWidth(120);
 			connectButton.getStyleClass().add(Styles.ROUNDED);
 			connectButton.setFocusTraversable(false);
+			connectButton.disableProperty().bind(working);
 			connectedVm.addChangeListener((obs, old, cur) -> {
 				if (cur == descriptor) {
 					connectButton.getStyleClass().addAll(Styles.ACCENT, Styles.SUCCESS);
@@ -378,6 +394,10 @@ public class RemoteVirtualMachinesPane extends BorderPane implements PostScanLis
 						propertyTable.setEditable(true);
 						propertyTable.getStyleClass().addAll(Styles.STRIPED, Tweaks.EDGE_TO_EDGE);
 						propertyTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
+						propertyTable.addEventHandler(KeyEvent.KEY_PRESSED, e -> {
+							if (e.getCode() == KeyCode.ESCAPE)
+								SceneUtils.forStage(propertyTable, Window::hide);
+						});
 						keyColumn.setMaxWidth(1f * Integer.MAX_VALUE * 25);
 						valueColumn.setMaxWidth(1f * Integer.MAX_VALUE * 75);
 						valueColumn.setEditable(true); // Allow double-clicking to allow interaction with the value text

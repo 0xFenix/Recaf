@@ -2,14 +2,14 @@ package software.coley.recaf.services.search.query;
 
 import jakarta.annotation.Nonnull;
 import jakarta.annotation.Nullable;
+import me.darknet.assembler.printer.JvmPrinterUtil;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.MethodNode;
 import software.coley.recaf.path.ClassMemberPathNode;
-import software.coley.recaf.path.InstructionPathNode;
+import software.coley.recaf.path.JvmInstructionPathNode;
 import software.coley.recaf.services.search.JvmClassSearchVisitor;
 import software.coley.recaf.services.search.match.StringPredicate;
-import software.coley.recaf.util.BlwUtil;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -51,7 +51,7 @@ public class InstructionQuery implements JvmClassQuery {
 						// This utility call maps instructions to BLW ones, and passes them to JASM
 						// so the format should match what you see in the assembler, barring labels
 						// and other debug info.
-						String disassembled = BlwUtil.toString(method.instructions.get(line));
+						String disassembled = JvmPrinterUtil.toString(method.instructions.get(line));
 						if (!predicates.get(j).match(disassembled)) {
 							matched.clear();
 							break;
@@ -62,7 +62,7 @@ public class InstructionQuery implements JvmClassQuery {
 
 					// Add result if we matched all predicates.
 					if (matched.size() == predicates.size()) {
-						InstructionPathNode path = memberPath.childInsn(method.instructions.get(i), i);
+						JvmInstructionPathNode path = memberPath.childInsn(method.instructions.get(i), i);
 						resultSink.accept(path, String.join("\n", matched));
 						matched.clear();
 					}

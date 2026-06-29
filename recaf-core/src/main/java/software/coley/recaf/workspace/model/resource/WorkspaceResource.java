@@ -6,7 +6,7 @@ import software.coley.recaf.behavior.Closing;
 import software.coley.recaf.info.ClassInfo;
 import software.coley.recaf.info.Info;
 import software.coley.recaf.info.properties.PropertyContainer;
-import software.coley.recaf.util.Streams;
+import software.coley.recaf.util.collect.Streams;
 import software.coley.recaf.workspace.model.Workspace;
 import software.coley.recaf.workspace.model.bundle.AndroidClassBundle;
 import software.coley.recaf.workspace.model.bundle.Bundle;
@@ -15,6 +15,7 @@ import software.coley.recaf.workspace.model.bundle.FileBundle;
 import software.coley.recaf.workspace.model.bundle.JvmClassBundle;
 import software.coley.recaf.workspace.model.bundle.VersionedJvmClassBundle;
 
+import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
 import java.util.stream.Stream;
@@ -61,9 +62,6 @@ public interface WorkspaceResource extends PropertyContainer, Closing {
 	 */
 	@Nonnull
 	Map<String, AndroidClassBundle> getAndroidClassBundles();
-
-	// TODO: Specific Android resource bundle for 'resources.arsc'?
-	//       - Or make custom FileInfo?
 
 	/**
 	 * @return Immediate files within the resource.
@@ -131,6 +129,14 @@ public interface WorkspaceResource extends PropertyContainer, Closing {
 	 */
 	default boolean isEmbeddedResource() {
 		return getContainingResource() != null;
+	}
+
+	/**
+	 * @return Iterable of all immediate JVM class bundles in the resource.
+	 */
+	@Nonnull
+	default Iterable<JvmClassBundle> jvmClassBundles() {
+		return List.of(getJvmClassBundle());
 	}
 
 	/**

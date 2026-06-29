@@ -2,7 +2,9 @@ package software.coley.recaf.path;
 
 import jakarta.annotation.Nonnull;
 import jakarta.annotation.Nullable;
-import net.greypanther.natsort.CaseInsensitiveSimpleNaturalComparator;
+import software.coley.recaf.info.ClassInfo;
+import software.coley.recaf.info.FileInfo;
+import software.coley.recaf.info.Named;
 import software.coley.recaf.workspace.model.bundle.AndroidClassBundle;
 import software.coley.recaf.workspace.model.bundle.Bundle;
 import software.coley.recaf.workspace.model.bundle.VersionedJvmClassBundle;
@@ -57,6 +59,28 @@ public class BundlePathNode extends AbstractPathNode<WorkspaceResource, Bundle> 
 	@Nonnull
 	public DirectoryPathNode child(@Nullable String directory) {
 		return new DirectoryPathNode(this, directory == null ? "" : directory);
+	}
+
+	/**
+	 * @param cls
+	 * 		Class to wrap in path node.
+	 *
+	 * @return Path node of class, with the current bundle + class package as parents.
+	 */
+	@Nonnull
+	public ClassPathNode child(@Nonnull ClassInfo cls) {
+		return new ClassPathNode(child(cls.getPackageName()), cls);
+	}
+
+	/**
+	 * @param file
+	 * 		File to wrap in path node.
+	 *
+	 * @return Path node of file, with the current bundle + file directory as parents.
+	 */
+	@Nonnull
+	public FilePathNode child(@Nonnull FileInfo file) {
+		return new FilePathNode(child(file.getDirectoryName()), file);
 	}
 
 	/**
@@ -116,18 +140,40 @@ public class BundlePathNode extends AbstractPathNode<WorkspaceResource, Bundle> 
 	}
 
 	@Override
+	public boolean hasEqualOrChildValue(@Nonnull PathNode<?> other) {
+		// Bundle equality checks are abysmally slow, but also potentially problematic for path comparisons.
+		// Two bundles may have the same contents, but they are not the same bundle.
+		// We kill two birds with one stone by doing a reference check here.
+		// If they are the same bundle, then they are the same path.
+		if (other instanceof BundlePathNode otherBundlePath)
+			return getValue() == otherBundlePath.getValue();
+		return super.hasEqualOrChildValue(other);
+	}
+
+	@Override
 	public int localCompare(PathNode<?> o) {
 		if (this == o)
 			return 0;
 
+		// Embedded resource containers go after other bundles.
+		// We want to show bundles like 'classes' and 'files' in the UI first.
+		if (o instanceof EmbeddedResourceContainerPathNode)
+			return -1;
+
 		if (o instanceof BundlePathNode bundlePathNode) {
+			// Quick check for bundle reference equality. If they are the same bundle, then they are the same path.
+			Bundle bundle = getValue();
+			Bundle otherBundle = bundlePathNode.getValue();
+			if (bundle == otherBundle)
+				return 0;
+
+			// Order bundles by type.
+			// This is a bitmask that encodes the bundle type which also doubles as order preference.
 			int cmp = Integer.compare(bundleMask(), bundlePathNode.bundleMask());
 			if (cmp != 0)
 				return cmp;
 
 			// Order dex class bundles to be in alphabetical order.
-			Bundle bundle = getValue();
-			Object otherBundle = o.getValue();
 			if (getParent() != null &&
 					bundle instanceof AndroidClassBundle &&
 					otherBundle instanceof AndroidClassBundle) {
@@ -143,7 +189,12 @@ public class BundlePathNode extends AbstractPathNode<WorkspaceResource, Bundle> 
 						.map(Map.Entry::getKey)
 						.findFirst()
 						.orElse(null);
-				return CaseInsensitiveSimpleNaturalComparator.getInstance().compare(dexName, otherDexName);
+				return Named.STRING_PATH_COMPARATOR.compare(dexName, otherDexName);
+			}
+			// Order versioned JVM class bundles by version number.
+			else if (bundle instanceof VersionedJvmClassBundle versionedBundle &&
+					otherBundle instanceof VersionedJvmClassBundle otherVersionedBundle) {
+				return Integer.compare(versionedBundle.version(), otherVersionedBundle.version());
 			}
 		}
 		return 0;

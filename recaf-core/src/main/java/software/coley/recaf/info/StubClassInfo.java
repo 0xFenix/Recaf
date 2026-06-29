@@ -2,12 +2,15 @@ package software.coley.recaf.info;
 
 import jakarta.annotation.Nonnull;
 import jakarta.annotation.Nullable;
+import me.darknet.dex.tree.definitions.ClassDefinition;
+import me.darknet.dex.tree.type.InstanceType;
 import org.objectweb.asm.ClassReader;
 import software.coley.recaf.info.annotation.AnnotationInfo;
 import software.coley.recaf.info.annotation.TypeAnnotationInfo;
 import software.coley.recaf.info.member.FieldMember;
 import software.coley.recaf.info.member.MethodMember;
 import software.coley.recaf.info.properties.Property;
+import software.coley.recaf.util.ExcludeFromJacocoGeneratedReport;
 import software.coley.recaf.util.JavaVersion;
 
 import java.util.Collections;
@@ -21,15 +24,34 @@ import java.util.function.Predicate;
  *
  * @author Matt Coley
  */
+@ExcludeFromJacocoGeneratedReport(justification = "Stub/placeholder type")
 public class StubClassInfo implements ClassInfo {
 	private final String name;
+	private final List<FieldMember> fields;
+	private final List<MethodMember> methods;
 
 	/**
 	 * @param name
 	 * 		Class name.
 	 */
 	public StubClassInfo(@Nonnull String name) {
+		this(name, Collections.emptyList(), Collections.emptyList());
+	}
+
+	/**
+	 * @param name
+	 * 		Class name.
+	 * @param fields
+	 * 		Fields to include.
+	 * @param methods
+	 * 		Methods to include.
+	 */
+	public StubClassInfo(@Nonnull String name,
+	                     @Nonnull List<FieldMember> fields,
+	                     @Nonnull List<MethodMember> methods) {
 		this.name = name;
+		this.fields = fields;
+		this.methods = methods;
 	}
 
 	@Override
@@ -94,13 +116,13 @@ public class StubClassInfo implements ClassInfo {
 	@Nonnull
 	@Override
 	public List<FieldMember> getFields() {
-		return Collections.emptyList();
+		return fields;
 	}
 
 	@Nonnull
 	@Override
 	public List<MethodMember> getMethods() {
-		return Collections.emptyList();
+		return methods;
 	}
 
 	@Override
@@ -194,9 +216,24 @@ public class StubClassInfo implements ClassInfo {
 		return name.hashCode();
 	}
 
+	@Override
+	public String toString() {
+		return name;
+	}
+
 	private static class Android extends StubClassInfo implements AndroidClassInfo {
 		public Android(@Nonnull String name) {
 			super(name);
+		}
+
+		@Nonnull
+		@Override
+		public ClassDefinition getBackingDefinition() {
+			return new ClassDefinition(
+					new InstanceType("L" + getName() + ";"),
+					new InstanceType("L" + getSuperName() + ";"),
+					getAccess()
+			);
 		}
 
 		@Nonnull

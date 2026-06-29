@@ -1,7 +1,5 @@
 package software.coley.recaf.services.deobfuscation.transform.generic;
 
-import it.unimi.dsi.fastutil.objects.Object2BooleanArrayMap;
-import it.unimi.dsi.fastutil.objects.Object2BooleanMap;
 import jakarta.annotation.Nonnull;
 import jakarta.enterprise.context.Dependent;
 import jakarta.inject.Inject;
@@ -21,11 +19,15 @@ import software.coley.recaf.services.transform.ClassTransformer;
 import software.coley.recaf.services.transform.JvmClassTransformer;
 import software.coley.recaf.services.transform.JvmTransformerContext;
 import software.coley.recaf.services.transform.TransformationException;
-import software.coley.recaf.util.analysis.ReEvaluationException;
-import software.coley.recaf.util.analysis.ReEvaluator;
+import software.coley.recaf.util.ClassMethodPair;
+import software.coley.recaf.util.analysis.eval.EvaluationResult;
+import software.coley.recaf.util.analysis.eval.EvaluationYieldResult;
+import software.coley.recaf.util.analysis.eval.Evaluator;
+import software.coley.recaf.util.analysis.eval.FieldCacheManager;
 import software.coley.recaf.util.analysis.value.DoubleValue;
 import software.coley.recaf.util.analysis.value.LongValue;
 import software.coley.recaf.util.analysis.value.ReValue;
+import software.coley.recaf.util.collect.primitive.Object2IntMap;
 import software.coley.recaf.workspace.model.Workspace;
 import software.coley.recaf.workspace.model.bundle.JvmClassBundle;
 import software.coley.recaf.workspace.model.resource.WorkspaceResource;
@@ -44,9 +46,11 @@ import java.util.Set;
 public class CallResultInliningTransformer implements JvmClassTransformer {
 	private final static int MAX_STEPS = 20_000; // TODO: Make configurable
 	private final InheritanceGraphService graphService;
-	private final Object2BooleanMap<String> canBeEvaluatedMap = new Object2BooleanArrayMap<>();
+	private final Object2IntMap<String> canBeEvaluatedMap = new Object2IntMap<>();
+	private final FieldCacheManager fieldCacheManager = new FieldCacheManager();
+
 	private InheritanceGraph inheritanceGraph;
-	private ReEvaluator evaluator;
+	private Evaluator evaluator;
 
 	@Inject
 	public CallResultInliningTransformer(@Nonnull InheritanceGraphService graphService) {
@@ -56,7 +60,7 @@ public class CallResultInliningTransformer implements JvmClassTransformer {
 	@Override
 	public void setup(@Nonnull JvmTransformerContext context, @Nonnull Workspace workspace) {
 		inheritanceGraph = graphService.getOrCreateInheritanceGraph(workspace);
-		evaluator = new ReEvaluator(workspace, context.newInterpreter(inheritanceGraph), MAX_STEPS);
+		evaluator = new Evaluator(workspace, context.newInterpreter(inheritanceGraph), fieldCacheManager, MAX_STEPS, false);
 	}
 
 	@Override
@@ -86,16 +90,23 @@ public class CallResultInliningTransformer implements JvmClassTransformer {
 					for (int j = 0; j < methodType.getArgumentCount(); j++)
 						arguments.addFirst(frame.getStack(frame.getStackSize() - 1 - j));
 
-					// All arguments must have known values.
-					if (arguments.stream().anyMatch(v -> !v.hasKnownValue()))
+					// Either we need zero arguments, or all arguments that have known values.
+					if (!arguments.isEmpty() && arguments.stream().anyMatch(v -> !v.hasKnownValue()))
 						continue;
 
 					// Target method must be able to be evaluated.
-					if (!canEvaluate(min))
+					ClassMethodPair target = context.resolveMethod(min);
+					if (target == null)
+						continue;
+					if (!evaluator.canEvaluate(target.methodNode()))
 						continue;
 
-					try {
-						ReValue retVal = evaluator.evaluate(min.owner, min.name, min.desc, null, arguments);
+					// Reset instance support before each evaluation to prevent state pollution.
+					fieldCacheManager.reset();
+
+					// Attempt evaluation. If it yields a value, replace the call with the result.
+					EvaluationResult result = evaluator.evaluate(target.classNode(), target.methodNode(), null, arguments);
+					if (result instanceof EvaluationYieldResult(ReValue retVal)) {
 						AbstractInsnNode replacement = OpaqueConstantFoldingTransformer.toInsn(retVal);
 						if (replacement != null) {
 							for (int arg = arguments.size() - 1; arg >= 0; arg--) {
@@ -108,8 +119,6 @@ public class CallResultInliningTransformer implements JvmClassTransformer {
 							instructions.set(min, replacement);
 							dirty = true;
 						}
-					} catch (ReEvaluationException ex) {
-						continue;
 					}
 				}
 			}
@@ -132,10 +141,4 @@ public class CallResultInliningTransformer implements JvmClassTransformer {
 		return "Call result inlining";
 	}
 
-	private boolean canEvaluate(@Nonnull MethodInsnNode min) {
-		String key = min.owner + "." + min.name + min.desc;
-		synchronized (canBeEvaluatedMap) {
-			return canBeEvaluatedMap.computeIfAbsent(key, k -> evaluator.canEvaluate(min.owner, min.name, min.desc));
-		}
-	}
 }

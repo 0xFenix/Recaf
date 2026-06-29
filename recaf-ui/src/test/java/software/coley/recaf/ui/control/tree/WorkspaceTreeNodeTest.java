@@ -1,5 +1,7 @@
 package software.coley.recaf.ui.control.tree;
 
+import jakarta.annotation.Nonnull;
+import javafx.collections.ObservableList;
 import javafx.scene.control.TreeItem;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Nested;
@@ -7,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import software.coley.collections.Unchecked;
 import software.coley.recaf.info.BasicFileInfo;
 import software.coley.recaf.info.FileInfo;
+import software.coley.recaf.info.JarFileInfo;
 import software.coley.recaf.info.JvmClassInfo;
 import software.coley.recaf.info.Named;
 import software.coley.recaf.info.StubClassInfo;
@@ -15,30 +18,53 @@ import software.coley.recaf.info.properties.BasicPropertyContainer;
 import software.coley.recaf.path.BundlePathNode;
 import software.coley.recaf.path.ClassPathNode;
 import software.coley.recaf.path.DirectoryPathNode;
+import software.coley.recaf.path.EmbeddedResourceContainerPathNode;
 import software.coley.recaf.path.FilePathNode;
 import software.coley.recaf.path.PathNode;
 import software.coley.recaf.path.PathNodes;
 import software.coley.recaf.path.ResourcePathNode;
 import software.coley.recaf.path.WorkspacePathNode;
+import software.coley.recaf.services.text.TextFormatConfig;
+import software.coley.recaf.services.workspace.io.BasicClassPatcher;
+import software.coley.recaf.services.workspace.io.BasicInfoImporter;
+import software.coley.recaf.services.workspace.io.BasicResourceImporter;
+import software.coley.recaf.services.workspace.io.InfoImporterConfig;
+import software.coley.recaf.services.workspace.io.ResourceImporter;
+import software.coley.recaf.services.workspace.io.ResourceImporterConfig;
+import software.coley.recaf.test.TestClassUtils;
 import software.coley.recaf.test.dummy.AccessibleFields;
 import software.coley.recaf.test.dummy.HelloWorld;
 import software.coley.recaf.test.dummy.StringConsumer;
 import software.coley.recaf.test.dummy.VariedModifierFields;
+import software.coley.recaf.ui.config.WorkspaceExplorerConfig;
+import software.coley.recaf.util.ZipCreationUtils;
+import software.coley.recaf.util.io.ByteSource;
+import software.coley.recaf.util.io.ByteSources;
 import software.coley.recaf.workspace.model.BasicWorkspace;
 import software.coley.recaf.workspace.model.Workspace;
 import software.coley.recaf.workspace.model.bundle.BasicFileBundle;
 import software.coley.recaf.workspace.model.bundle.BasicJvmClassBundle;
 import software.coley.recaf.workspace.model.bundle.JvmClassBundle;
+import software.coley.recaf.workspace.model.bundle.VersionedJvmClassBundle;
+import software.coley.recaf.workspace.model.resource.BasicWorkspaceFileResource;
 import software.coley.recaf.workspace.model.resource.WorkspaceFileResource;
 import software.coley.recaf.workspace.model.resource.WorkspaceFileResourceBuilder;
 import software.coley.recaf.workspace.model.resource.WorkspaceResource;
 import software.coley.recaf.workspace.model.resource.WorkspaceResourceBuilder;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static software.coley.recaf.test.TestClassUtils.*;
@@ -48,6 +74,8 @@ import static software.coley.recaf.ui.control.tree.WorkspaceTreeNode.getOrInsert
  * Tests for {@link WorkspaceTreeNode}.
  */
 class WorkspaceTreeNodeTest {
+	static ResourceImporter importer;
+	// Workspace model for testing - Used by multiple tests, but some will make their own.
 	static Workspace workspace;
 	static WorkspaceResource primaryResource;
 	static WorkspaceResource resourceWithEmbedded;
@@ -78,6 +106,11 @@ class WorkspaceTreeNodeTest {
 
 	@BeforeAll
 	static void setup() throws IOException {
+		importer = new BasicResourceImporter(
+				new BasicInfoImporter(new InfoImporterConfig(), new TextFormatConfig(), new BasicClassPatcher()),
+				new ResourceImporterConfig()
+		);
+
 		BasicFileBundle fileBundle = new BasicFileBundle();
 
 		primaryJvmBundle = fromClasses(
@@ -107,7 +140,7 @@ class WorkspaceTreeNodeTest {
 		p1d = p2.child(classD);
 
 		// Content available in the default package/root directory.
-		default2 = p3f.child(null);
+		default2 = p3f.child((String) null);
 		default1 = default2.child(new BasicFileInfo("root.txt", new byte[0], new BasicPropertyContainer()));
 
 		// The path will visually look like (root)//zero.txt in the workspace tree.
@@ -131,7 +164,6 @@ class WorkspaceTreeNodeTest {
 				.embeddedChildContainer()
 				.child(embeddedResource)
 				.child(embeddedResource.getFileBundle())
-				.child(null)
 				.child(default1.getValue());
 
 		WorkspaceTreeNode root = new WorkspaceTreeNode(workspacePath);
@@ -165,6 +197,130 @@ class WorkspaceTreeNodeTest {
 		Object createdPathFile = child.getValue().getValue();
 		FileInfo file = default1.getValue();
 		assertEquals(file, createdPathFile, "File at end of path not the same");
+	}
+
+	@Test
+	void embeddedResourceOrderingFollowsPathNameInBulkBuild() {
+		// root:
+		//  a.jar/a.txt
+		//  z.jar/z.txt
+		WorkspaceFileResource zResource = embeddedResource("z.jar", "z.txt");
+		WorkspaceFileResource aResource = embeddedResource("a.jar", "a.txt");
+		Map<String, WorkspaceFileResource> embeddedResources = new LinkedHashMap<>();
+		embeddedResources.put("z.jar", zResource);
+		embeddedResources.put("a.jar", aResource);
+		WorkspaceResource hostResource = new WorkspaceResourceBuilder()
+				.withEmbeddedResources(embeddedResources)
+				.build();
+		Workspace workspace = new BasicWorkspace(hostResource);
+		WorkspacePathNode rootPath = PathNodes.workspacePath(workspace);
+		ResourcePathNode hostPath = rootPath.child(hostResource);
+		WorkspaceRootTreeNode root = new WorkspaceRootTreeNode(new WorkspaceExplorerConfig(), rootPath);
+
+		root.build();
+
+		// Embedded resources are listed after the resource's direct bundles.
+		WorkspaceTreeNode hostNode = root.getNodeByPath(hostPath);
+		assertNotNull(hostNode, "Could not find host resource");
+		List<TreeItem<PathNode<?>>> hostChildren = hostNode.getSourceChildren();
+		assertFalse(hostChildren.isEmpty(), "Host resource had no children");
+		assertTrue(hostChildren.getLast().getValue() instanceof EmbeddedResourceContainerPathNode,
+				"Embedded resources should be listed after resource bundles");
+
+		WorkspaceTreeNode containerNode = root.getNodeByPath(hostPath.embeddedChildContainer());
+		assertNotNull(containerNode, "Could not find embedded resource container");
+
+		// Resources should be sorted by their path name, regardless of insertion order.
+		List<TreeItem<PathNode<?>>> children = containerNode.getSourceChildren();
+		assertEquals(2, children.size(), "Expected two embedded resource nodes");
+		assertSame(aResource, children.get(0).getValue().getValue(), "Embedded resources not sorted by path name");
+		assertSame(zResource, children.get(1).getValue().getValue(), "Embedded resources not sorted by path name");
+	}
+
+	@Test
+	void nestedEmbeddedResourcesAreFlattenedIntoSingleContainerInBulkBuild() {
+		// Build a workspace with the following structure:
+		//  host/
+		//   deep.jar/
+		//    internal.txt
+		//	  super-deep.jar/
+		//	    deep.txt
+		WorkspaceFileResource deepResource = embeddedResource("jars/super-deep.jar", "deep.txt");
+		BasicFileBundle internalFiles = new BasicFileBundle();
+		internalFiles.put(new StubFileInfo("internal.txt"));
+		WorkspaceFileResource internalResource = new WorkspaceFileResourceBuilder(new BasicJvmClassBundle(), internalFiles)
+				.withFileInfo(new StubFileInfo("jars/deep.jar"))
+				.withEmbeddedResources(Map.of("jars/super-deep.jar", embeddedResource("jars/super-deep.jar", "deep.txt")))
+				.build();
+		WorkspaceResource hostResource = new WorkspaceResourceBuilder()
+				.withEmbeddedResources(Map.of("jars/deep.jar", internalResource))
+				.build();
+		Workspace workspace = new BasicWorkspace(hostResource);
+		WorkspacePathNode rootPath = PathNodes.workspacePath(workspace);
+		ResourcePathNode hostPath = rootPath.child(hostResource);
+
+		// Build the tree model.
+		WorkspaceRootTreeNode root = new WorkspaceRootTreeNode(new WorkspaceExplorerConfig(), rootPath);
+		root.build();
+
+		// We should be able to find the embedded resource container.
+		WorkspaceTreeNode containerNode = root.getNodeByPath(hostPath.embeddedChildContainer());
+		assertNotNull(containerNode, "Could not find embedded resource container");
+
+		// The embedded container should have both (because we flatten embeddings):
+		// - The direct embedded resource
+		// - The nested embedded resource
+		List<TreeItem<PathNode<?>>> children = containerNode.getSourceChildren();
+		assertEquals(2, children.size(), "Expected direct and nested embedded resource nodes");
+		List<?> childValues = children.stream()
+				.map(TreeItem::getValue)
+				.map(PathNode::getValue)
+				.toList();
+		assertTrue(childValues.contains(internalResource), "Direct embedded resource missing");
+		assertTrue(childValues.contains(deepResource), "Nested embedded resource missing");
+	}
+
+	@Test
+	void embeddedResourceCompareDoesNotUseResourceEquality() {
+		WorkspaceFileResource aResource = equalityBombEmbeddedResource("a.jar", "a.txt");
+		WorkspaceFileResource bResource = equalityBombEmbeddedResource("b.jar", "b.txt");
+		Map<String, WorkspaceFileResource> embeddedResources = new LinkedHashMap<>();
+		embeddedResources.put("a.jar", aResource);
+		embeddedResources.put("b.jar", bResource);
+		WorkspaceResource hostResource = new WorkspaceResourceBuilder()
+				.withEmbeddedResources(embeddedResources)
+				.build();
+		Workspace workspace = new BasicWorkspace(hostResource);
+		EmbeddedResourceContainerPathNode embeddedContainer = PathNodes.workspacePath(workspace)
+				.child(hostResource)
+				.embeddedChildContainer();
+
+		// Local compare should bypass the equals()/hashCode() methods of the resources.
+		// We don't want to check contents for sorting, just the path name.
+		assertTrue(embeddedContainer.child(aResource).localCompare(embeddedContainer.child(bResource)) < 0);
+		assertTrue(embeddedContainer.child(bResource).localCompare(embeddedContainer.child(aResource)) > 0);
+	}
+
+	@Test
+	void nestedEmbeddedResourceCompareUsesRecursivePathLookup() {
+		WorkspaceFileResource aResource = embeddedResource("2.jar", "a.txt");
+		WorkspaceFileResource bResource = embeddedResource("3.jar", "b.txt");
+		WorkspaceFileResource containerResource = new WorkspaceFileResourceBuilder(new BasicJvmClassBundle(), new BasicFileBundle())
+				.withFileInfo(new StubFileInfo("1.jar"))
+				.withEmbeddedResources(Map.of("2.jar", aResource, "3.jar", bResource))
+				.build();
+		WorkspaceResource hostResource = new WorkspaceResourceBuilder()
+				.withEmbeddedResources(Map.of("1.jar", containerResource))
+				.build();
+		Workspace workspace = new BasicWorkspace(hostResource);
+		EmbeddedResourceContainerPathNode embeddedContainer = PathNodes.workspacePath(workspace)
+				.child(hostResource)
+				.embeddedChildContainer();
+
+		// Local compare should compare the path names of the resources, even if the resource objects themselves are not equal.
+		// The idea is that the path name is what determines sorting, not the resource contents or identity.
+		assertTrue(embeddedContainer.child(aResource).localCompare(embeddedContainer.child(bResource)) < 0);
+		assertTrue(embeddedContainer.child(bResource).localCompare(embeddedContainer.child(aResource)) > 0);
 	}
 
 	@Test
@@ -262,6 +418,166 @@ class WorkspaceTreeNodeTest {
 		assertArrayEquals(new Object[]{a, b, cu, c, d, e}, children.toArray());
 	}
 
+	@Test
+	void nameOverloadSensitivity() {
+		WorkspaceTreeNode root = new WorkspaceTreeNode(p5);
+		WorkspaceTreeNode bundle = root.getOrCreateNodeByPath(p3c);
+
+		// Adding classes with different capitalization should yield different nodes.
+		// Adding the same capitalization should yield the same node.
+		WorkspaceTreeNode a1 = root.getOrCreateNodeByPath(p3c.child("aaa"));
+		WorkspaceTreeNode a1_alt = root.getOrCreateNodeByPath(p3c.child("aaa"));
+		WorkspaceTreeNode a2 = root.getOrCreateNodeByPath(p3c.child("aaA"));
+		WorkspaceTreeNode a3 = root.getOrCreateNodeByPath(p3c.child("aAa"));
+		WorkspaceTreeNode a4 = root.getOrCreateNodeByPath(p3c.child("Aaa"));
+		WorkspaceTreeNode a5 = root.getOrCreateNodeByPath(p3c.child("AAA"));
+
+		// Same node check
+		assertSame(a1, a1_alt, "Same path yielded different node references");
+
+		// Different node check
+		List.of(a2, a3, a4, a5).forEach(n -> {
+			assertNotNull(n, "Expected node to be created");
+			assertNotSame(a1, n, "Different path yielded same node reference");
+		});
+	}
+
+	/**
+	 * Similar to {@link #nameOverloadSensitivity()} and {@link #emptyDirDoesNotNamedPathSorting()} but also covers a case
+	 * with old code in {@link WorkspaceRootTreeNode} where we pre-sorted items before insertion and then ignored the
+	 * binary search's returned index to instead always append to the end of the list. This meant that items with
+	 * different names could wind up in the wrong order if the pre-sort was wrong.
+	 * <p>
+	 * The pre-sorting was wrong specifically in the following case:
+	 * <ul>
+	 *     <li>com/example/treemap</li>
+	 *     <li>com/example/treeview</li>
+	 *     <li>com/example/tree</li>
+	 * </ul>
+	 * The pre-sort would put "tree" after "treemap" and "treeview", but the binary search would find that "tree"
+	 * should be before both of them. So why was the pre-sort wrong? Because the named path comparator was getting confused
+	 * when comparing full class names in the packages. If you look at the index 16 of the string
+	 * (where the '/' would be after "tree") you have the comparator comparing "/" vs "m" or "v".
+	 * <p>
+	 * This has since been fixed in the named path comparator, and we no longer pre-sort before insertion.
+	 * However, this test is still useful to ensure that the sorting logic does not regress.
+	 */
+	@Test
+	void nameOrdering() {
+		WorkspaceTreeNode root = new WorkspaceTreeNode(p5);
+		Function<String, ClassPathNode> func = dir -> p3c.child(dir).child(new StubClassInfo(dir + "/Clazz"));
+		String n0dir = "";
+		String n1dir = "a";
+		String n2dir = "aa";
+		String n3dir = "aaa";
+		ClassPathNode n0 = func.apply(n0dir);
+		ClassPathNode n1 = func.apply(n1dir);
+		ClassPathNode n1s = func.apply(n1dir + "/a");
+		ClassPathNode n2 = func.apply(n2dir);
+		ClassPathNode n2s = func.apply(n2dir + "/a");
+		ClassPathNode n3 = func.apply(n3dir);
+		ClassPathNode n3s = func.apply(n3dir + "/a");
+		permutations(List.of(n0, n1, n1s, n2, n2s, n3, n3s)).forEach(ordered -> {
+			// Clear children from prior permutation run.
+			root.getSourceChildren().clear();
+
+			// Insert in this order.
+			for (ClassPathNode path : ordered) {
+				WorkspaceTreeNode node = WorkspaceTreeNode.getOrInsertIntoTree(root, path);
+				assertNotNull(node, "Node not created for path: " + path.getValue().getName());
+			}
+
+			// Assert sorted order.
+			// Regardless of the permuted insertion order, the final tree order should always be the same.
+			WorkspaceTreeNode bundle = root.getOrCreateNodeByPath(p3c);
+			ObservableList<TreeItem<PathNode<?>>> children = bundle.getSourceChildren();
+			assertEquals(4, children.size(), "Expected 4 directory children");
+			assertEquals(n0dir, children.get(0).getValue().getValue());
+			assertEquals(n1dir, children.get(1).getValue().getValue());
+			assertEquals(n2dir, children.get(2).getValue().getValue());
+			assertEquals(n3dir, children.get(3).getValue().getValue());
+		});
+	}
+
+	/**
+	 * While not an issue of name overloading in adjacent tree nodes, this test covers a case/regression where we
+	 * saw multiple classes with the same name in different versioned paths not being all shown.
+	 * This scenario has the effect of making all {@link VersionedJvmClassBundle} have map equality too which was
+	 * another issue with an older version of the path node path containment/equality logic.
+	 */
+	@Test
+	void multipleVersionedPaths() throws Exception {
+		String classPath = HelloWorld.class.getName().replace(".", "/");
+		String classPackage = classPath.substring(0, classPath.lastIndexOf('/'));
+		byte[] classBytes = TestClassUtils.fromRuntimeClass(HelloWorld.class).getBytecode();
+
+		// Create JAR with 'META-INF/versions/<dummyversion>/<dummypackage>/HelloWorld.class' for multiple versions.
+		byte[] zipBytes = ZipCreationUtils.builder()
+				.add(classPath + ".class", classBytes)
+				.add(JarFileInfo.MULTI_RELEASE_PREFIX + "9/" + classPath + ".class", classBytes)
+				.add(JarFileInfo.MULTI_RELEASE_PREFIX + "11/" + classPath + ".class", classBytes)
+				.add(JarFileInfo.MULTI_RELEASE_PREFIX + "16/" + classPath + ".class", classBytes)
+				.add(JarFileInfo.MULTI_RELEASE_PREFIX + "21/" + classPath + ".class", classBytes)
+				.add(JarFileInfo.MULTI_RELEASE_PREFIX + "25/" + classPath + ".class", classBytes)
+				.bytes();
+		ByteSource zipSource = ByteSources.wrap(zipBytes);
+
+		// Build the workspace and validate the versioned bundles exist.
+		WorkspaceResource resource = importer.importResource(zipSource);
+		BasicWorkspace workspace = new BasicWorkspace(resource);
+		assertEquals(5, resource.getVersionedJvmClassBundles().size(), "Expected 5 versioned bundles: 9, 11, 16, 21, 25");
+
+		// Build the tree model.
+		WorkspacePathNode rootPath = PathNodes.workspacePath(workspace);
+		WorkspaceRootTreeNode root = new WorkspaceRootTreeNode(new WorkspaceExplorerConfig(), rootPath);
+		root.build();
+
+		// Iterate over all versions, validate the path to the versioned class exists and that no duplicate tree paths exist.
+		final int baseline = -1;
+		int[] versions = new int[]{baseline, 9, 11, 16, 21, 25};
+		Set<BundlePathNode> visitedNodes = Collections.newSetFromMap(new IdentityHashMap<>());
+		for (int version : versions) {
+			String versionName = version == baseline ? "baseline" : String.valueOf(version);
+			ClassPathNode path = version == baseline ?
+					workspace.findJvmClass(classPath) :
+					workspace.findVersionedJvmClass(classPath, version);
+			assertNotNull(path, "Could not find class path for version: " + versionName);
+			WorkspaceTreeNode classNode = root.getNodeByPath(path);
+			assertNotNull(classNode, "Could not find tree node for class path for version: " + versionName);
+			BundlePathNode bundleNode = path.getParent().getParent();
+			assertTrue(visitedNodes.add(bundleNode), "Duplicate bundle node found for version: " + versionName);
+		}
+		assertEquals(6, visitedNodes.size(), "Expected 6 unique bundle nodes for versions: baseline, 9, 11, 16, 21, 25");
+	}
+
+	@Test
+	void dynamicallyAddedSupportingResourcesCreateDistinctResourceNodes() {
+		// Ensure that when there are dynamically added supporting resources they properly get represented in the tree.
+		WorkspaceResource primary = resourceWithFile("primary.txt");
+		WorkspaceResource supportingA = resourceWithFile("support-a.txt");
+		WorkspaceResource supportingB = resourceWithFile("support-b.txt");
+
+		// Start with just the primary resource.
+		BasicWorkspace workspace = new BasicWorkspace(primary, Collections.emptyList(), false);
+		WorkspacePathNode rootPath = PathNodes.workspacePath(workspace);
+		TestWorkspaceRootTreeNode root = new TestWorkspaceRootTreeNode(new WorkspaceExplorerConfig(), rootPath);
+
+		// We should see the primary resource, but not the supporting resources.
+		root.build();
+		assertNotNull(root.getNodeByPath(rootPath.child(primary)), "Primary resource should be visible after build");
+
+		// Add a supporting resources and validate they get their own nodes in the tree.
+		workspace.addSupportingResource(supportingA);
+		root.visitResourcePublic(supportingA);
+		assertNotNull(root.getNodeByPath(rootPath.child(supportingA)), "First supporting resource should have its own node");
+
+		// Add another supporting resource and validate it also gets its own node and that the prior nodes are not affected.
+		workspace.addSupportingResource(supportingB);
+		root.visitResourcePublic(supportingB);
+		assertNotNull(root.getNodeByPath(rootPath.child(supportingB)), "Second supporting resource should have its own node");
+		assertEquals(3, root.getSourceChildren().size(), "Expected distinct tree nodes for primary and both supporting resources");
+	}
+
 	/**
 	 * The named path sorter was getting confused when checking "does 'a' have 'b' as a parent-directory" if either
 	 * String was empty, which is the case for classes in the default package. This led to inconsistent return value
@@ -273,20 +589,34 @@ class WorkspaceTreeNodeTest {
 	@Test
 	void emptyDirDoesNotNamedPathSorting() {
 		WorkspaceTreeNode root = new WorkspaceTreeNode(p5);
-		WorkspaceTreeNode bundle = root.getOrCreateNodeByPath(p3c);
 
-		// Our 'WorkspaceRootTreeNode' pre-sorts paths so it will use this specific method and set 'sorted=true'
-		// which is not the default value. This covers a special case where the 'default package' / 'root directory'
-		// was throwing off tree sorting before we added a special case for it.
-		WorkspaceTreeNode empty = WorkspaceTreeNode.getOrInsertIntoTree(root, p3c.child("").child(new StubClassInfo("module-info")), true);
-		WorkspaceTreeNode ex1 = WorkspaceTreeNode.getOrInsertIntoTree(root, p3c.child("example").child(new StubClassInfo("Foo")), true);
-		WorkspaceTreeNode ex2 = WorkspaceTreeNode.getOrInsertIntoTree(root, p3c.child("example").child(new StubClassInfo("Bar")), true);
+		// No matter what insertion order, the tree should sort correctly.
+		ClassPathNode childModule = p3c.child("").child(new StubClassInfo("module-info"));
+		ClassPathNode childFoo = p3c.child("example").child(new StubClassInfo("example/Foo"));
+		ClassPathNode childBar = p3c.child("example").child(new StubClassInfo("example/Bar"));
+		permutations(List.of(childModule, childFoo, childBar)).forEach(ordered -> {
+			// Clear children from prior permutation run.
+			root.getSourceChildren().clear();
 
-		// The tree should have both example paths have the same parent "example" node.
-		// The bundle should see two children, the empty directory, and the "example" directory.
-		List<TreeItem<PathNode<?>>> children = bundle.getSourceChildren();
-		assertSame(ex1.getParent(), ex2.getParent());
-		assertEquals(2, children.size());
+			// Insert in this order.
+			WorkspaceTreeNode bundle = root.getOrCreateNodeByPath(p3c);
+			for (ClassPathNode path : ordered) {
+				WorkspaceTreeNode node = WorkspaceTreeNode.getOrInsertIntoTree(root, path);
+				assertNotNull(node, "Node not created for path: " + path.getValue().getName());
+			}
+
+			// Fetch now that tree is built.
+			WorkspaceTreeNode ex1 = WorkspaceTreeNode.getOrInsertIntoTree(root, childFoo);
+			WorkspaceTreeNode ex2 = WorkspaceTreeNode.getOrInsertIntoTree(root, childBar);
+			WorkspaceTreeNode exM = WorkspaceTreeNode.getOrInsertIntoTree(root, childModule);
+
+			// The tree should have both example paths have the same parent "example" node.
+			// The bundle should see two children, the empty directory, and the "example" directory.
+			List<TreeItem<PathNode<?>>> children = bundle.getSourceChildren();
+			assertNotEquals(exM.getParent(), ex1.getParent()); // default-package vs example package
+			assertSame(ex1.getParent(), ex2.getParent()); // both in example package
+			assertEquals(2, children.size()); // example/ and default-package/
+		});
 	}
 
 	@Test
@@ -418,6 +748,7 @@ class WorkspaceTreeNodeTest {
 	}
 
 	@Test
+	@SuppressWarnings("deprecation")
 	void matches() {
 		WorkspaceTreeNode root = new WorkspaceTreeNode(p5);
 		root.getOrCreateNodeByPath(p1a);
@@ -426,13 +757,86 @@ class WorkspaceTreeNodeTest {
 		// Should yield the class info node.
 		WorkspaceTreeNode child = root;
 		while (!child.getChildren().isEmpty())
-			child = (WorkspaceTreeNode) child.getChildren().get(0);
+			child = (WorkspaceTreeNode) child.getChildren().getFirst();
+
+		// Validate it is the node for the class info.
+		assertTrue(child.matches(p1a));
+
+		// Now do the same, but following the "source" tree.
+		while (!child.getSourceChildren().isEmpty())
+			child = (WorkspaceTreeNode) child.getSourceChildren().getFirst();
 
 		// Validate it is the node for the class info.
 		assertTrue(child.matches(p1a));
 	}
 
+	@Nonnull
+	private static <T> Stream<List<T>> permutations(@Nonnull Collection<T> input) {
+		if (input.size() == 1)
+			return Stream.of(new ArrayList<>(input));
+		return input.stream()
+				.flatMap(first -> permutations(input.stream()
+						.filter(a -> !a.equals(first))
+						.toList())
+						.map(ArrayList::new)
+						.peek(l -> l.addFirst(first)));
+	}
+
+	@Nonnull
+	private static WorkspaceFileResource embeddedResource(@Nonnull String sourceName, @Nonnull String fileName) {
+		BasicFileBundle fileBundle = new BasicFileBundle();
+		fileBundle.put(new StubFileInfo(fileName));
+		return new WorkspaceFileResourceBuilder(new BasicJvmClassBundle(), fileBundle)
+				.withFileInfo(new StubFileInfo(sourceName))
+				.build();
+	}
+
+	@Nonnull
+	private static WorkspaceFileResource equalityBombEmbeddedResource(@Nonnull String sourceName, @Nonnull String fileName) {
+		BasicFileBundle fileBundle = new BasicFileBundle();
+		fileBundle.put(new StubFileInfo(fileName));
+		return new EqualityBombWorkspaceFileResource(new WorkspaceFileResourceBuilder(new BasicJvmClassBundle(), fileBundle)
+				.withFileInfo(new StubFileInfo(sourceName)));
+	}
+
+	@Nonnull
+	private static WorkspaceResource resourceWithFile(@Nonnull String fileName) {
+		BasicFileBundle fileBundle = new BasicFileBundle();
+		fileBundle.put(new StubFileInfo(fileName));
+		return new WorkspaceResourceBuilder(new BasicJvmClassBundle(), fileBundle).build();
+	}
+
+	/**
+	 * A resource that throws an exception if its equality or hash code is checked.
+	 */
+	private static class EqualityBombWorkspaceFileResource extends BasicWorkspaceFileResource {
+		private EqualityBombWorkspaceFileResource(@Nonnull WorkspaceFileResourceBuilder builder) {
+			super(builder);
+		}
+
+		@Override
+		public boolean equals(Object o) {
+			throw new AssertionError("Embedded resource comparison should not use equals");
+		}
+
+		@Override
+		public int hashCode() {
+			throw new AssertionError("Embedded resource comparison should not use hashCode");
+		}
+	}
+
+	private static class TestWorkspaceRootTreeNode extends WorkspaceRootTreeNode {
+		private TestWorkspaceRootTreeNode(@Nonnull WorkspaceExplorerConfig explorerConfig, @Nonnull WorkspacePathNode rootPath) {
+			super(explorerConfig, rootPath);
+		}
+
+		private void visitResourcePublic(@Nonnull WorkspaceResource resource) {
+			visitResource(resource);
+		}
+	}
+
 	@Nested
+	@SuppressWarnings("deprecation") // Intentionally testing filtered API which is marked deprecated to discourage use.
 	class Filtered {
 		@Test
 		void insertWhileFilteredStillUpdatesChildren() {

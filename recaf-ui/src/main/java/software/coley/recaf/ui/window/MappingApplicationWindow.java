@@ -3,9 +3,7 @@ package software.coley.recaf.ui.window;
 import jakarta.annotation.Nonnull;
 import jakarta.enterprise.context.Dependent;
 import jakarta.inject.Inject;
-import javafx.scene.input.KeyCode;
-import javafx.scene.input.KeyEvent;
-import software.coley.recaf.ui.pane.MappingApplicationPane;
+import software.coley.recaf.ui.pane.mapping.MappingApplicationPane;
 import software.coley.recaf.util.Lang;
 
 /**
@@ -24,10 +22,7 @@ public class MappingApplicationWindow extends RecafStage {
 		generatorPane.setApplyCallback(this::close);
 
 		// Add event filter to handle closing the window when escape is pressed.
-		addEventFilter(KeyEvent.KEY_PRESSED, e -> {
-			if (e.getCode() == KeyCode.ESCAPE)
-				hide();
-		});
+		hideOnEscape();
 
 		// Layout
 		titleProperty().bind(Lang.getBinding("mapapply"));

@@ -1,6 +1,5 @@
 package software.coley.recaf.services.cell.icon;
 
-import dev.xdark.blw.code.Instruction;
 import jakarta.annotation.Nonnull;
 import jakarta.annotation.Nullable;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -17,7 +16,6 @@ import software.coley.recaf.services.Service;
 import software.coley.recaf.services.cell.context.FieldContextMenuProviderFactory;
 import software.coley.recaf.services.cell.context.MethodContextMenuProviderFactory;
 import software.coley.recaf.ui.control.tree.WorkspaceTreeCell;
-import software.coley.recaf.util.BlwUtil;
 import software.coley.recaf.workspace.model.Workspace;
 import software.coley.recaf.workspace.model.bundle.*;
 import software.coley.recaf.workspace.model.resource.WorkspaceResource;
@@ -256,16 +254,17 @@ public class IconProviderService implements Service {
 	 * @param instruction
 	 * 		The instruction to create an icon for.
 	 *
-	 * @return Icon provider for the class member.
+	 * @return Icon provider for the instruction.
 	 */
 	@Nonnull
 	public IconProvider getInstructionIconProvider(@Nonnull Workspace workspace,
-												   @Nonnull WorkspaceResource resource,
-												   @Nonnull ClassBundle<?> bundle,
-												   @Nonnull ClassInfo declaringClass,
-												   @Nonnull MethodMember declaringMethod,
-												   @Nonnull AbstractInsnNode instruction) {
-		return getInstructionIconProvider(workspace, resource, bundle, declaringClass, declaringMethod, BlwUtil.convert(instruction));
+	                                               @Nonnull WorkspaceResource resource,
+	                                               @Nonnull ClassBundle<?> bundle,
+	                                               @Nonnull ClassInfo declaringClass,
+	                                               @Nonnull MethodMember declaringMethod,
+	                                               @Nonnull AbstractInsnNode instruction) {
+		InstructionIconProviderFactory factory = instructionIconOverride != null ? instructionIconOverride : instructionIconDefault;
+		return factory.getInstructionIconProvider(workspace, resource, bundle, declaringClass, declaringMethod, instruction);
 	}
 
 	/**
@@ -288,11 +287,11 @@ public class IconProviderService implements Service {
 	 */
 	@Nonnull
 	public IconProvider getInstructionIconProvider(@Nonnull Workspace workspace,
-												   @Nonnull WorkspaceResource resource,
-												   @Nonnull ClassBundle<?> bundle,
-												   @Nonnull ClassInfo declaringClass,
-												   @Nonnull MethodMember declaringMethod,
-												   @Nonnull Instruction instruction) {
+	                                               @Nonnull WorkspaceResource resource,
+	                                               @Nonnull ClassBundle<?> bundle,
+	                                               @Nonnull ClassInfo declaringClass,
+	                                               @Nonnull MethodMember declaringMethod,
+	                                               @Nonnull me.darknet.dex.tree.definitions.instructions.Instruction instruction) {
 		InstructionIconProviderFactory factory = instructionIconOverride != null ? instructionIconOverride : instructionIconDefault;
 		return factory.getInstructionIconProvider(workspace, resource, bundle, declaringClass, declaringMethod, instruction);
 	}

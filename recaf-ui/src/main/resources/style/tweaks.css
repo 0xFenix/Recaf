@@ -52,6 +52,12 @@
     -fx-background-insets: 0;
 }
 
+/* Clearly separates toolbar from UI below */
+.config-toolbar {
+    -fx-border-color: -color-border-muted;
+    -fx-border-width: 0 0 1px 0;
+}
+
 /* Indicates a class in the workspace tree has been edited */
 .modified-class-cell {
     -fx-text-fill: rgb(75, 175, 210);
@@ -66,6 +72,12 @@
 }
 .background-dark {
     -fx-background-color: -color-bg-overlay !important;
+}
+.background-dark-transparent {
+    -fx-background-color: rgba(0, 0, 0, 0.25) !important;
+}
+.background-inset {
+    -fx-background-color: -color-bg-inset !important;
 }
 
 /* Tweak the larger titles to not be bold (which looks rather ugly in most cases) */

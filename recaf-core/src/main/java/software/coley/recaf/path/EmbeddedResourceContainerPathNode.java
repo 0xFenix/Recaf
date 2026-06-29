@@ -50,11 +50,15 @@ public class EmbeddedResourceContainerPathNode extends AbstractPathNode<Workspac
 	@Nonnull
 	@Override
 	public Set<String> directParentTypeIds() {
-		return Set.of(EmbeddedResourceContainerPathNode.TYPE_ID);
+		return Set.of(ResourcePathNode.TYPE_ID);
 	}
 
 	@Override
 	public int localCompare(PathNode<?> o) {
+		// Embedded resource containers go after other bundles.
+		// We want to show bundles like 'classes' and 'files' in the UI first.
+		if (o instanceof BundlePathNode)
+			return 1;
 		return 0;
 	}
 }

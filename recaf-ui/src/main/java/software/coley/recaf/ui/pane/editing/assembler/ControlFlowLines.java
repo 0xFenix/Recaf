@@ -1,8 +1,8 @@
 package software.coley.recaf.ui.pane.editing.assembler;
 
 import atlantafx.base.controls.Spacer;
-import it.unimi.dsi.fastutil.ints.Int2IntArrayMap;
 import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
 import jakarta.enterprise.context.Dependent;
 import jakarta.inject.Inject;
 import javafx.animation.Interpolator;
@@ -18,14 +18,18 @@ import javafx.scene.layout.StackPane;
 import javafx.scene.paint.Color;
 import javafx.util.Duration;
 import me.darknet.assembler.ast.ASTElement;
-import me.darknet.assembler.ast.primitive.ASTArray;
-import me.darknet.assembler.ast.primitive.ASTCode;
 import me.darknet.assembler.ast.primitive.ASTInstruction;
 import me.darknet.assembler.ast.primitive.ASTLabel;
-import me.darknet.assembler.ast.primitive.ASTObject;
 import me.darknet.assembler.ast.specific.ASTClass;
 import me.darknet.assembler.ast.specific.ASTMethod;
+import me.darknet.assembler.parser.BytecodeFormat;
+import me.darknet.assembler.query.AssemblyQueries;
+import me.darknet.assembler.query.AssemblyUtils;
+import me.darknet.assembler.query.LabelInfo;
+import me.darknet.assembler.query.LabelQueryResult;
+import me.darknet.assembler.query.LabelUsage;
 import me.darknet.assembler.util.Location;
+import me.darknet.assembler.util.Range;
 import org.reactfx.Change;
 import org.slf4j.Logger;
 import software.coley.bentofx.control.canvas.PixelCanvas;
@@ -44,20 +48,20 @@ import software.coley.recaf.ui.control.richtext.linegraphics.AbstractTextBoundLi
 import software.coley.recaf.ui.control.richtext.linegraphics.LineContainer;
 import software.coley.recaf.util.Colors;
 import software.coley.recaf.util.FxThreadUtil;
+import software.coley.recaf.util.collect.primitive.Int2IntMap;
 import software.coley.recaf.util.threading.ThreadUtil;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.HashMap;
-import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.stream.Stream;
 
 /**
  * Controller for displaying control flow jump lines.
@@ -67,9 +71,6 @@ import java.util.function.Consumer;
 @Dependent
 public class ControlFlowLines extends AstBuildConsumerComponent {
 	private static final Logger logger = Logging.get(ControlFlowLines.class);
-	private static final Set<String> FLOW_INSN_SET = Set.of("goto", "ifnull", "ifnonnull", "ifeq", "ifne", "ifle", "ifge", "iflt", "ifgt",
-			"if_acmpeq", "if_acmpne", "if_icmpeq", "if_icmpge", "if_icmpgt", "if_icmple", "if_icmplt", "if_icmpne", "jsr");
-	private static final Set<String> SWITCH_INSNS = Set.of("tableswitch", "lookupswitch");
 	private final Consumer<Change<Integer>> onCaretMove = this::onCaretMove;
 	private final ObservableObject<ASTInstruction> currentInstructionSelection = new ObservableObject<>(null);
 	private final ObservableBoolean drawLines = new ObservableBoolean(false);
@@ -137,16 +138,14 @@ public class ControlFlowLines extends AstBuildConsumerComponent {
 
 	@Override
 	protected void onPipelineOutputUpdate() {
-		// Keep a reference to the old model.
-		List<LabelData> oldModel = model;
-
 		// Update the model.
+		List<LabelData> oldModel = model;
 		updateModel();
+		List<LabelData> newModel = model;
 
 		// If the model has changed, refresh the visible paragraph graphics.
 		// This can mean a new label as added, new reference to one, etc.
 		// This could result in new line shapes, so redrawing them all is wise.
-		List<LabelData> newModel = model;
 		Editor editor = this.editor;
 		if (editor != null && !Objects.equals(oldModel, newModel))
 			FxThreadUtil.run(editor::redrawParagraphGraphics);
@@ -154,7 +153,7 @@ public class ControlFlowLines extends AstBuildConsumerComponent {
 
 	/**
 	 * Handles updating the {@link ControlFlowLineFactory}.
-	 * <p/>
+	 * <p>
 	 * This logic is shoe-horned into here <i>(for now)</i> because
 	 * the variable tracking logic is internal to this class only.
 	 *
@@ -173,7 +172,8 @@ public class ControlFlowLines extends AstBuildConsumerComponent {
 				} else if (current != null) {
 					String insnName = current.identifier().content();
 					List<ASTElement> arguments = current.arguments();
-					if (!arguments.isEmpty() && FLOW_INSN_SET.contains(insnName) || SWITCH_INSNS.contains(insnName)) {
+					if ((!arguments.isEmpty() && AssemblyUtils.isFlowControlInstruction(BytecodeFormat.JVM, insnName))
+							|| AssemblyUtils.isSwitchInstruction(BytecodeFormat.JVM, insnName)) {
 						hasSelection = true;
 					}
 				}
@@ -191,28 +191,7 @@ public class ControlFlowLines extends AstBuildConsumerComponent {
 		try {
 			int pos = editor.getCodeArea().getCaretPosition();
 			int line = editor.getCodeArea().getCurrentParagraph() + 1;
-			for (ASTElement element : astElements) {
-				if (element == null)
-					continue;
-				if (element.range().within(pos)) {
-					element.walk(ast -> {
-						if (ast instanceof ASTInstruction instruction) {
-							Location location = ast.location();
-							if (location != null && location.line() == line)
-								selected.set(instruction);
-							else {
-								String identifier = instruction.identifier().content();
-								if (("tableswitch".equals(identifier)
-										|| "lookupswitch".equals(identifier))
-										&& ast.range().within(pos)) {
-									selected.set(instruction);
-								}
-							}
-						}
-						return !selected.isSet();
-					});
-				}
-			}
+			selected.set(AssemblyUtils.findInstruction(astElements, pos, line));
 		} catch (Throwable t) {
 			logger.warn("Error finding selected AST element", t);
 		}
@@ -221,16 +200,29 @@ public class ControlFlowLines extends AstBuildConsumerComponent {
 
 	private void updateModel() {
 		// Skip if we've not selected a method
-		if (currentMethod == null) {
+		ASTMethod astMethod = findCurrentAstMethod();
+		if (astMethod == null) {
 			model = Collections.emptyList();
 			return;
 		}
 
 		// Collect all label usage information from the AST.
-		Map<String, AstUsages> labelUsages = collectLabelReferences();
-		model = labelUsages.entrySet().stream()
-				.filter(e -> !e.getValue().readers().isEmpty()) // Must have a label declaration
-				.map(e -> new LabelData(e.getKey(), e.getValue(), new Int2IntArrayMap(), new IntBox(-1), new Box<>()))
+		LabelQueryResult labelQuery = AssemblyQueries.labels(astMethod, BytecodeFormat.JVM);
+		Map<String, LabelData> labels = new LinkedHashMap<>();
+		for (LabelInfo declaration : labelQuery.declarations()) {
+			labels.putIfAbsent(declaration.name(), new LabelData(
+					declaration.name(),
+					declaration.declaration(),
+					labelQuery.usagesOf(declaration.name()).stream()
+							.<ASTElement>map(LabelUsage::reference)
+							.toList(),
+					new Int2IntMap(),
+					new IntBox(-1),
+					new Box<>()
+			));
+		}
+
+		model = labels.values().stream()
 				.sorted(Comparator.comparing(LabelData::name))
 				.toList();
 		model.forEach(data -> {
@@ -240,8 +232,8 @@ public class ControlFlowLines extends AstBuildConsumerComponent {
 			while (true) {
 				incr:
 				{
-					for (LabelData d : overlapping) {
-						if (slotIndex == d.lineSlot().get()) {
+					for (LabelData other : overlapping) {
+						if (slotIndex == other.lineSlot().get()) {
 							slotIndex++;
 							break incr;
 						}
@@ -253,83 +245,39 @@ public class ControlFlowLines extends AstBuildConsumerComponent {
 		});
 	}
 
-	@Nonnull
-	private Map<String, AstUsages> collectLabelReferences() {
-		AstUsages emptyUsage = AstUsages.EMPTY_USAGE;
-		Map<String, List<ASTElement>> labelReads = new HashMap<>();
-		Map<String, List<ASTElement>> labelWrites = new HashMap<>();
-		BiConsumer<String, ASTElement> readUpdater = (name, element) -> labelReads.computeIfAbsent(name, n -> new ArrayList<>()).add(element);
-		BiConsumer<String, ASTElement> writeUpdater = (name, element) -> labelWrites.computeIfAbsent(name, n -> new ArrayList<>()).add(element);
-		if (astElements != null) {
-			Consumer<ASTMethod> methodConsumer = astMethod -> {
-				if (currentMethod != null && !Objects.equals(currentMethod.getName(), astMethod.getName().literal()))
-					return;
-				ASTCode code = astMethod.code();
-				if (code == null)
-					return;
-				for (ASTInstruction instruction : code.instructions()) {
-					if (instruction instanceof ASTLabel label) {
-						readUpdater.accept(label.identifier().content(), label);
-					} else {
-						String insnName = instruction.identifier().content();
-						List<ASTElement> arguments = instruction.arguments();
-						if (!arguments.isEmpty()) {
-							if (FLOW_INSN_SET.contains(insnName)) {
-								writeUpdater.accept(arguments.getLast().content(), instruction);
-							} else if ("tableswitch".equals(insnName)) {
-								if (!instruction.arguments().isEmpty() && instruction.arguments().getFirst() instanceof ASTObject switchObj) {
-									ASTArray cases = switchObj.value("cases");
-									ASTElement defaultCase = switchObj.value("default");
-									cases.values().forEach(caseAst -> writeUpdater.accept(caseAst.content(), caseAst));
-									writeUpdater.accept(defaultCase.content(), defaultCase);
-								}
-							} else if ("lookupswitch".equals(insnName)) {
-								if (!instruction.arguments().isEmpty() && instruction.arguments().getFirst() instanceof ASTObject switchObj) {
-									ASTElement defaultCase = switchObj.value("default");
-									writeUpdater.accept(defaultCase.content(), defaultCase);
-									switchObj.values().pairs().forEach(pair -> {
-										writeUpdater.accept(pair.second().content(), pair.first());
-									});
-								}
-							}
-						}
-					}
-				}
-			};
-			for (ASTElement astElement : astElements) {
-				if (astElement instanceof ASTMethod astMethod) {
-					methodConsumer.accept(astMethod);
-				} else if (astElement instanceof ASTClass astClass) {
-					for (ASTElement child : astClass.children()) {
-						if (child instanceof ASTMethod astMethod) {
-							methodConsumer.accept(astMethod);
-						}
-					}
-				}
-			}
-		}
-		Set<String> keys = new HashSet<>();
-		keys.addAll(labelReads.keySet());
-		keys.addAll(labelWrites.keySet());
-		Map<String, AstUsages> labelUsages = new HashMap<>();
-		for (String key : keys) {
-			List<ASTElement> reads = labelReads.get(key);
-			List<ASTElement> writes = labelWrites.get(key);
-			labelUsages.put(key, new AstUsages(
-					Objects.requireNonNullElse(reads, Collections.emptyList()),
-					Objects.requireNonNullElse(writes, Collections.emptyList()),
-					false));
-		}
-		return labelUsages;
-	}
-
 	private void clearData() {
 		model = Collections.emptyList();
 		currentMethod = null;
 	}
 
+	@Nullable
+	private ASTMethod findCurrentAstMethod() {
+		if (currentMethod == null)
+			return null;
+
+		String methodName = currentMethod.getName();
+		String methodDescriptor = currentMethod.getDescriptor();
+		for (ASTElement astElement : astElements) {
+			if (astElement instanceof ASTMethod astMethod) {
+				if (matchesMethod(astMethod, methodName, methodDescriptor))
+					return astMethod;
+			} else if (astElement instanceof ASTClass astClass) {
+				for (ASTElement child : astClass.children()) {
+					if (child instanceof ASTMethod astMethod && matchesMethod(astMethod, methodName, methodDescriptor))
+						return astMethod;
+				}
+			}
+		}
+		return null;
+	}
+
+	private static boolean matchesMethod(@Nonnull ASTMethod astMethod, @Nonnull String methodName, @Nonnull String methodDescriptor) {
+		return Objects.equals(methodName, astMethod.getName().literal()) &&
+				Objects.equals(methodDescriptor, astMethod.getDescriptor().literal());
+	}
+
 	/**
-	 * Highlighter which shows read and write access of a {@link LabelData}.
+	 * Highlighter which shows connecting lines between contents of {@link LabelData}.
 	 */
 	private class ControlFlowLineFactory extends AbstractTextBoundLineGraphicFactory {
 		private static final int MASK_NORTH = 1;
@@ -344,7 +292,6 @@ public class ControlFlowLines extends AstBuildConsumerComponent {
 			super(AbstractLineGraphicFactory.P_BRACKET_MATCH - 1);
 
 			// Populate offsets
-			int j = 0;
 			for (int i = 0; i < offsets.length; i++)
 				offsets[i] = 1 + (i * 3);
 		}
@@ -372,7 +319,7 @@ public class ControlFlowLines extends AstBuildConsumerComponent {
 			PixelCanvas canvas = null;
 			for (LabelData labelData : localModel) {
 				// Skip if there are no references to the current label.
-				List<ASTElement> labelReferrers = labelData.usage().writers();
+				List<ASTElement> labelReferrers = labelData.references();
 				if (labelReferrers.isEmpty()) continue;
 
 				// Skip if line is not inside a jump range.
@@ -384,7 +331,7 @@ public class ControlFlowLines extends AstBuildConsumerComponent {
 					if (value == null) {
 						// No current selection?  We can skip everything. Just return.
 						return;
-					} else if (SWITCH_INSNS.contains(value.identifier().literal())) {
+					} else if (AssemblyUtils.isSwitchInstruction(BytecodeFormat.JVM, value.identifier().literal())) {
 						// If the selected item is a switch we want to draw all the lines to all destinations.
 						//
 						// The label data writers will be targeting the label identifier children in the AST
@@ -397,9 +344,9 @@ public class ControlFlowLines extends AstBuildConsumerComponent {
 							destinations.ensureCapacity(e.children().size() + 1);
 							return true;
 						});
-						if (labelData.usage().readersAndWriters().noneMatch(destinations::contains))
+						if (labelData.allElements().noneMatch(destinations::contains))
 							continue;
-					} else if (labelData.usage().readersAndWriters().noneMatch(m -> m.equals(value))) {
+					} else if (labelData.allElements().noneMatch(value::equals)) {
 						// Anything else like a label declaration or a jump instruction mentioning a label
 						// can be handled with a basic equality check against all the usage readers/writers.
 						continue;
@@ -437,7 +384,7 @@ public class ControlFlowLines extends AstBuildConsumerComponent {
 
 				// There is always one 'reader' AKA the label itself.
 				// We will use this to figure out which direction to draw lines in below.
-				ASTElement labelTarget = labelData.labelDeclaration();
+				ASTElement labelTarget = labelData.declaration();
 				int declarationLine = labelTarget.location().line() - 1;
 
 				int parallelLines = Math.max(1, labelData.computeOverlapping(model).size());
@@ -569,7 +516,6 @@ public class ControlFlowLines extends AstBuildConsumerComponent {
 					long now = System.currentTimeMillis();
 					float diff = now % rainbowHueRotationDurationMillis;
 
-					float halfMillis = (float) rainbowHueRotationDurationMillis / 2;
 					float hue = Math.abs((4 * diff / rainbowHueRotationDurationMillis) - 2) - 1;
 					ColorAdjust adjust = new ColorAdjust(hue, 0.0, 0.0, 0.0);
 					adjust.setInput(effect);
@@ -584,6 +530,100 @@ public class ControlFlowLines extends AstBuildConsumerComponent {
 		@Override
 		public void changed(AbstractObservable ob, Object old, Object current) {
 			if (editor != null) editor.redrawParagraphGraphics();
+		}
+	}
+
+	/**
+	 * Enriched data about a label declaration and its references.
+	 * <br>
+	 * Pulled from {@link LabelQueryResult} <i>(See: {@link #updateModel()})</i> but with additional helpers.
+	 *
+	 * @param name
+	 * 		The label name.
+	 * @param declaration
+	 * 		The AST element where the label is declared.
+	 * @param references
+	 * 		The AST elements that reference the label.
+	 * @param linesOnLinesMap
+	 * 		Cached count of how many times this label is referenced on a given line. Key is line number, value is count.
+	 * @param lineSlot
+	 * 		The assigned line slot for this label. Used for drawing parallel lines.
+	 * @param overlapping
+	 * 		Cached list of other labels that have overlapping line ranges with this label.
+	 */
+	private record LabelData(@Nonnull String name,
+	                         @Nonnull ASTLabel declaration,
+	                         @Nonnull List<ASTElement> references,
+	                         @Nonnull Int2IntMap linesOnLinesMap,
+	                         @Nonnull IntBox lineSlot,
+	                         @Nonnull Box<List<LabelData>> overlapping) {
+		@Nonnull
+		public Stream<ASTElement> allElements() {
+			return Stream.concat(Stream.of(declaration), references.stream());
+		}
+
+		@Nonnull
+		public Range range() {
+			var summary = allElements()
+					.mapToInt(element -> Objects.requireNonNull(element.location()).line())
+					.summaryStatistics();
+			return new Range(summary.getMin(), summary.getMax());
+		}
+
+		public int countRefsOnLine(int line) {
+			return linesOnLinesMap.computeIfAbsent(line,
+					ignored -> Math.toIntExact(allElements()
+							.filter(element -> element.location().line() == line)
+							.count()));
+		}
+
+		public List<LabelData> computeOverlapping(@Nonnull Collection<LabelData> labelDatum) {
+			return overlapping.computeIfAbsent(() -> {
+				Range range = range();
+				List<LabelData> overlap = new ArrayList<>();
+				for (LabelData data : labelDatum) {
+					if (name.equals(data.name)) continue;
+					if (data.references().isEmpty()) continue;
+
+					Range otherRange = data.range();
+					if (Math.max(range.start(), otherRange.start()) <= Math.min(range.end(), otherRange.end()))
+						overlap.add(data);
+				}
+				return overlap;
+			});
+		}
+
+		public boolean isInRange(int line) {
+			Location declarationLoc = declaration.location();
+			if (declarationLoc == null) return false;
+			int declarationLine = declarationLoc.line();
+			if (declarationLine == line) return true;
+
+			for (ASTElement referrer : references) {
+				Location referrerLoc = referrer.location();
+				if (referrerLoc == null) continue;
+				int referrerLine = referrerLoc.line();
+
+				if (referrerLine == line) return true;
+				if ((declarationLine > referrerLine) ?
+						(line > referrerLine && line < declarationLine) :
+						(line > declarationLine && line < referrerLine)) return true;
+			}
+			return false;
+		}
+
+		@Override
+		public boolean equals(Object o) {
+			if (this == o) return true;
+			if (o == null || getClass() != o.getClass()) return false;
+
+			LabelData labelData = (LabelData) o;
+			return name.equals(labelData.name);
+		}
+
+		@Override
+		public int hashCode() {
+			return name.hashCode();
 		}
 	}
 }

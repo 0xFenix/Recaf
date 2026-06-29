@@ -25,6 +25,7 @@ dependencies {
     implementation(libs.reactfx)
     implementation(libs.richtextfx)
     implementation(libs.treemapfx)
+    implementation(libs.spatialcanvas)
 }
 
 application {
@@ -52,3 +53,5 @@ shadowJar {
         exclude(dependency(javaFxIncludeInDist ? 'invalid:invalid:invalid' : 'org.openjfx:.*:.*'))
     }
 }
+
+apply from: '../gradle/tasks.gradle'

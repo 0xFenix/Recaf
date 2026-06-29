@@ -2,6 +2,7 @@ package software.coley.recaf.ui.control;
 
 import jakarta.annotation.Nonnull;
 import jakarta.annotation.Nullable;
+import javafx.beans.property.ObjectProperty;
 import javafx.beans.value.ObservableValue;
 import javafx.event.ActionEvent;
 import javafx.event.EventHandler;
@@ -21,6 +22,11 @@ import java.util.concurrent.ExecutorService;
  */
 public class ActionButton extends Button implements Tooltipable {
 	private static final ExecutorService service = ThreadPoolFactory.newSingleThreadExecutor("async-button-action");
+
+	/**
+	 * Set nothing initially.
+	 */
+	public ActionButton() {}
 
 	/**
 	 * @param text
@@ -51,6 +57,17 @@ public class ActionButton extends Button implements Tooltipable {
 	 */
 	public ActionButton(@Nonnull Node graphic, @Nonnull Runnable action) {
 		setGraphic(graphic);
+		setOnAction(e -> wrap(e, action));
+	}
+
+	/**
+	 * @param graphic
+	 * 		Button display graphic property.
+	 * @param action
+	 * 		Action to run on-click.
+	 */
+	public ActionButton(@Nonnull ObjectProperty<Node> graphic, @Nonnull Runnable action) {
+		graphicProperty().bindBidirectional(graphic);
 		setOnAction(e -> wrap(e, action));
 	}
 
@@ -153,7 +170,7 @@ public class ActionButton extends Button implements Tooltipable {
 		return this;
 	}
 
-	private static void wrap(ActionEvent e, Runnable action) {
+	protected static void wrap(ActionEvent e, Runnable action) {
 		// This stops the input from 'bleeding' through to parent control handlers.
 		//  - Useful for when the button is used in 'x.setGraphic(button)' scenarios
 		e.consume();
