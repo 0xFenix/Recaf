@@ -67,6 +67,7 @@ import software.coley.sourcesolver.model.CompilationUnitModel;
 import software.coley.sourcesolver.model.ImportModel;
 import software.coley.sourcesolver.model.MethodBodyModel;
 import software.coley.sourcesolver.model.MethodModel;
+import software.coley.sourcesolver.model.Model;
 import software.coley.sourcesolver.model.NamedModel;
 import software.coley.sourcesolver.model.VariableModel;
 import software.coley.sourcesolver.resolve.result.DescribableResolution;
@@ -309,6 +310,44 @@ public class JavaContextActionSupport implements EditorComponent, UpdatableNavig
 		return resolvePosition(pos, true);
 	}
 
+	/**
+	 * @param pos
+	 * 		Offset in the source.
+	 *
+	 * @return Path of the enclosing class/member declaration at the offset.
+	 */
+	@Nullable
+	public PathNode<?> getEnclosingDeclarationPath(int pos) {
+		CompilationUnitModel localUnit = unit;
+		ResolverAdapter localResolver = resolver;
+		ClassPathNode localPath = path;
+
+		// Skip if we don't have a valid AST to work with.
+		if (localUnit == null || localResolver == null || localPath == null)
+			return null;
+
+		// Resolve the class we're in at the current position.
+		int astPos = offset(pos);
+		ClassModel classModel = null;
+		for (ClassModel candidate : localUnit.getRecursiveChildrenOfType(ClassModel.class)) {
+			Range candidateRange = candidate.getRange();
+			if (!candidateRange.isWithin(astPos))
+				continue;
+			if ((classModel == null || candidateRange.length() < classModel.getRange().length()))
+				classModel = candidate;
+		}
+
+		// No class? No enclosing declaration path to return.
+		if (classModel == null)
+			return null;
+
+		// Check if we're in a member declaration, and if so return that path.
+		ClassMemberPathNode memberPath = getEnclosingMemberPath(localResolver, classModel, astPos);
+		if (memberPath != null)
+			return memberPath;
+		return getClassPath(localResolver, classModel, localPath);
+	}
+
 	@Override
 	public int mapCurrentPositionToAst(int pos) {
 		return offset(pos);
@@ -438,8 +477,7 @@ public class JavaContextActionSupport implements EditorComponent, UpdatableNavig
 					FxThreadUtil.run(() -> editor.redrawParagraphGraphics());
 				} else {
 					unit = resultingUnit;
-					resolver = astService.newJavaResolver(workspace, resultingUnit);
-					resolver.setClassContext(getPath().getValue());
+					resolver = astService.newJavaResolver(workspace, getPath(), resultingUnit);
 
 					logger.debugging(l -> l.info("AST parsed successfully, took {}ms", diffMs));
 					astAvailabilityButton.setAvailable();
@@ -467,15 +505,19 @@ public class JavaContextActionSupport implements EditorComponent, UpdatableNavig
 	private void populateInheritanceTracking() {
 		Workspace localWorkspace = workspace;
 		CompilationUnitModel localUnit = unit;
-		if (workspace == null || localUnit == null || resolver == null)
+		ResolverAdapter localResolver = resolver;
+		if (localWorkspace == null || localUnit == null || localResolver == null)
 			return;
 		CompletableFuture.supplyAsync(() -> {
 			List<Inheritance> inheritances = new ArrayList<>();
 			List<ClassModel> classModels = localUnit.getRecursiveChildrenOfType(ClassModel.class);
 			for (ClassModel classModel : classModels) {
 				// Resolve what class each model represents.
-				AstResolveResult classResolutionResult = resolver.resolveThenAdapt(classModel.getRange().begin());
-				if (classResolutionResult == null || !(classResolutionResult.path() instanceof ClassPathNode resolvedClassPath))
+				PathNode<?> classPath = getResolvedPath(localResolver, classModel);
+				if (classPath == null)
+					continue;
+				ClassPathNode resolvedClassPath = classPath.getPathOfType(ClassInfo.class);
+				if (resolvedClassPath == null)
 					continue;
 
 				// Get vertex in inheritance graph for the resolved class.
@@ -487,9 +529,9 @@ public class JavaContextActionSupport implements EditorComponent, UpdatableNavig
 				// Gather parents and children from inheritance graph.
 				// - Note: The map values may be null if the class is not in the workspace.
 				Map<InheritanceVertex, ClassPathNode> children = resolvedVertex.allChildren()
-						.collect(IdentityHashMap::new, (m, v) -> m.put(v, workspace.findClass(v.getName())), IdentityHashMap::putAll);
+						.collect(IdentityHashMap::new, (m, v) -> m.put(v, localWorkspace.findClass(v.getName())), IdentityHashMap::putAll);
 				Map<InheritanceVertex, ClassPathNode> parents = resolvedVertex.allParents()
-						.collect(IdentityHashMap::new, (m, v) -> m.put(v, workspace.findClass(v.getName())), IdentityHashMap::putAll);
+						.collect(IdentityHashMap::new, (m, v) -> m.put(v, localWorkspace.findClass(v.getName())), IdentityHashMap::putAll);
 
 				// For all methods in this model, find matching methods in parents/children and track them.
 				for (MethodModel methodModel : classModel.getMethods()) {
@@ -500,10 +542,8 @@ public class JavaContextActionSupport implements EditorComponent, UpdatableNavig
 					int line = 1 + editor.getCodeArea().offsetToPosition(methodLinePos, TwoDimensional.Bias.Forward).getMajor();
 
 					// Resolve what method each model represents.
-					// - Underlying model is funky and resolving the modifier position is the best programmatic way to resolve the method.
-					//   The method model's start position likely has an annotation or javadoc there that throws off resolution.
-					AstResolveResult methodResolutionResult = resolver.resolveThenAdapt(methodResolvePos);
-					if (methodResolutionResult == null || !(methodResolutionResult.path() instanceof ClassMemberPathNode resolvedMethodPath))
+					ClassMemberPathNode resolvedMethodPath = getMemberPath(localResolver, methodModel);
+					if (resolvedMethodPath == null)
 						continue;
 					ClassMember resolvedMethod = resolvedMethodPath.getValue();
 
@@ -749,6 +789,86 @@ public class JavaContextActionSupport implements EditorComponent, UpdatableNavig
 			ClassInfo classInfo = classPath.getValue();
 			ThreadUtil.run(() -> initialize(classInfo));
 		}
+	}
+
+	@Nullable
+	private static ClassMemberPathNode getEnclosingMemberPath(@Nonnull ResolverAdapter resolver,
+	                                                          @Nonnull ClassModel classModel,
+	                                                          int astPos) {
+		// Check for method declarations first.
+		for (MethodModel methodModel : classModel.getMethods()) {
+			if (!methodModel.getRange().isWithin(astPos))
+				continue;
+			ClassMemberPathNode path = getMemberPath(resolver, methodModel);
+			if (path != null)
+				return path;
+		}
+
+		// Check for field declarations last.
+		for (VariableModel fieldModel : classModel.getFields()) {
+			if (!fieldModel.getRange().isWithin(astPos))
+				continue;
+			ClassMemberPathNode path = getMemberPath(resolver, fieldModel);
+			if (path != null)
+				return path;
+		}
+
+		return null;
+	}
+
+	@Nullable
+	private static ClassMemberPathNode getMemberPath(@Nonnull ResolverAdapter resolver, int astPos) {
+		PathNode<?> path = getResolvedPath(resolver, astPos);
+		if (path == null)
+			return null;
+		return path.getPathOfType(ClassMember.class);
+	}
+
+	@Nullable
+	private static ClassMemberPathNode getMemberPath(@Nonnull ResolverAdapter resolver, @Nonnull MethodModel method) {
+		PathNode<?> path = getResolvedPath(resolver, method);
+		if (path == null)
+			return null;
+		return path.getPathOfType(ClassMember.class);
+	}
+
+	@Nullable
+	private static ClassMemberPathNode getMemberPath(@Nonnull ResolverAdapter resolver, @Nonnull VariableModel field) {
+		PathNode<?> path = getResolvedPath(resolver, field);
+		if (path == null)
+			return null;
+		return path.getPathOfType(ClassMember.class);
+	}
+
+	@Nonnull
+	private static ClassPathNode getClassPath(@Nonnull ResolverAdapter resolver,
+	                                          @Nonnull ClassModel classModel,
+	                                          @Nonnull ClassPathNode fallbackPath) {
+		PathNode<?> path = getResolvedPath(resolver, classModel.getRange().begin());
+		if (path == null)
+			return fallbackPath;
+
+		ClassPathNode classPath = path.getPathOfType(ClassInfo.class);
+		if (classPath == null)
+			return fallbackPath;
+
+		return classPath;
+	}
+
+	@Nullable
+	private static PathNode<?> getResolvedPath(@Nonnull ResolverAdapter resolver, @Nonnull Model model) {
+		AstResolveResult result = resolver.adapt(model.resolve(resolver), model);
+		if (result == null)
+			return null;
+		return result.path();
+	}
+
+	@Nullable
+	private static PathNode<?> getResolvedPath(@Nonnull ResolverAdapter resolver, int astPos) {
+		AstResolveResult result = resolver.resolveThenAdapt(astPos);
+		if (result == null)
+			return null;
+		return result.path();
 	}
 
 	/**
